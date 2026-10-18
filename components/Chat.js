@@ -3,17 +3,16 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { info } from '../lib/info'
 import Avatar from './Avatar'
-import Call from './Call'
 import GroupInfo from './GroupInfo'
 import { Attachment, Once, Pic } from './Media'
 
 const TYPES = ['image/png', 'image/jpeg']
 const MAX_IMAGE = 10 * 1024 * 1024
 
-export default function Chat({ chat, uid, friends, actions, onBack, onProfile }) {
+export default function Chat({ chat, uid, friends, actions, inCall, roomUsers, onJoinCall, onOpenCall, onBack, onProfile }) {
   const [msgs, setMsgs] = useState([])
   const [text, setText] = useState('')
-  const [call, setCall] = useState(false)
+  const [tick, setTick] = useState(0)
   const [showGroup, setShowGroup] = useState(false)
   const [att, setAtt] = useState(null)
   const [sending, setSending] = useState(false)
@@ -47,6 +46,15 @@ export default function Chat({ chat, uid, friends, actions, onBack, onProfile })
   }, [chat.id])
 
   useEffect(() => { end.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
+
+  // only the newest call message can still be live, and only while someone is in the room
+  const lastCallId = [...msgs].reverse().find(x => x.kind !== 'text')?.id
+  const live = !!roomUsers && roomUsers.length > 0
+  useEffect(() => {
+    if (!lastCallId) return
+    const t = setTimeout(() => setTick(v => v + 1), 8200) // grace while the presence list catches up
+    return () => clearTimeout(t)
+  }, [lastCallId])
   useEffect(() => { attRef.current = att }, [att])
   useEffect(() => () => { if (attRef.current) URL.revokeObjectURL(attRef.current.url) }, [])
 
@@ -117,8 +125,10 @@ export default function Chat({ chat, uid, friends, actions, onBack, onProfile })
   }
 
   async function startCall() {
-    await insert({ kind: 'voice', body: 'Voice call' })
-    setCall(true)
+    if (inCall) return onOpenCall()
+    // joining a call that is already running must not post a second "started a call"
+    if (!live) await insert({ kind: 'voice', body: 'Voice call' })
+    onJoinCall()
   }
 
   return (
@@ -128,17 +138,23 @@ export default function Chat({ chat, uid, friends, actions, onBack, onProfile })
         <Avatar url={i.avatar} name={i.name} onClick={other ? () => onProfile(other) : undefined} />
         <b>{i.name}</b>
         {chat.is_group && <button className="ghost" onClick={() => setShowGroup(true)}>Members</button>}
-        <button className="ghost" onClick={startCall}>Call</button>
+        <button className={inCall ? '' : 'ghost'} onClick={startCall}>{inCall ? 'In call' : live ? 'Join call' : 'Call'}</button>
       </div>
       <div className="msgs">
         {msgs.length === 0 && <div className="empty small">No messages yet<span className="caret">_</span></div>}
         {msgs.map(m => {
           if (m.kind !== 'text') {
-            const live = Date.now() - new Date(m.created_at).getTime() < 30 * 60 * 1000
+            const last = m.id === lastCallId
+            const fresh = Date.now() - new Date(m.created_at).getTime() < 8000
+            let status = null
+            if (!last) status = <span>Call ended</span>
+            else if (inCall) status = <><span>You are in this call</span><button onClick={onOpenCall}>Open</button></>
+            else if (live) status = <><span>{roomUsers.length} in call</span><button onClick={onJoinCall}>Join</button></>
+            else if (roomUsers && !fresh) status = <span>Call ended</span>
             return (
               <div key={m.id} className="sys">
                 {names[m.sender_id]} started a call
-                {live && <button onClick={() => setCall(true)}>Join</button>}
+                {status}
               </div>
             )
           }
@@ -176,7 +192,6 @@ export default function Chat({ chat, uid, friends, actions, onBack, onProfile })
         <input value={text} onChange={e => setText(e.target.value)} placeholder={att ? 'Add a caption' : 'Message'} />
         <button disabled={sending}>{sending ? 'Sending...' : 'Send'}</button>
       </form>
-      {call && <Call conversationId={chat.id} uid={uid} title={i.name} people={people} onEnd={() => setCall(false)} />}
       {showGroup && (
         <GroupInfo chat={chat} uid={uid} friends={friends} actions={actions} onProfile={onProfile} onClose={() => setShowGroup(false)} />
       )}

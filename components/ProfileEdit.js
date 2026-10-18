@@ -4,15 +4,27 @@ import { supabase } from '../lib/supabase'
 import Modal from './Modal'
 import Avatar from './Avatar'
 import Cropper from './Cropper'
+import { shrinkBanner } from '../lib/image'
 
 const AVATAR_TYPES = ['image/png', 'image/jpeg']
 const BANNER_TYPES = ['image/png', 'image/jpeg', 'image/gif']
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif' }
 
-async function upload(bucket, uid, file) {
-  const path = `${uid}/${Date.now()}.${EXT[file.type]}`
-  const { error } = await supabase.storage.from(bucket).upload(path, file, { contentType: file.type })
+async function upload(bucket, uid, file, name = String(Date.now())) {
+  const path = `${uid}/${name}.${EXT[file.type]}`
+  const { error } = await supabase.storage.from(bucket).upload(path, file, { contentType: file.type, cacheControl: '31536000' })
   return error ? null : supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
+}
+
+// avatar is stored in 3 sizes (_l 512px, _m 256px, _s 128px), Avatar picks the best one for each place
+async function uploadAvatar(uid, v) {
+  const t = Date.now()
+  const [l, m, s] = await Promise.all([
+    upload('avatars', uid, v.l, `${t}_l`),
+    upload('avatars', uid, v.m, `${t}_m`),
+    upload('avatars', uid, v.s, `${t}_s`)
+  ])
+  return l && m && s ? l : null
 }
 
 export default function ProfileEdit({ me, onClose }) {
@@ -23,7 +35,7 @@ export default function ProfileEdit({ me, onClose }) {
   const [crop, setCrop] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const avatarSrc = useMemo(() => (avatar ? URL.createObjectURL(avatar) : me.avatar_url), [avatar, me.avatar_url])
+  const avatarSrc = useMemo(() => (avatar ? URL.createObjectURL(avatar.m) : me.avatar_url), [avatar, me.avatar_url])
   const bannerSrc = useMemo(() => (banner ? URL.createObjectURL(banner) : me.banner_url), [banner, me.banner_url])
 
   const pick = (types, set) => e => {
@@ -42,8 +54,8 @@ export default function ProfileEdit({ me, onClose }) {
     setBusy(true)
     setErr('')
     const [a, b] = await Promise.all([
-      avatar ? upload('avatars', me.id, avatar) : null,
-      banner ? upload('banners', me.id, banner) : null
+      avatar ? uploadAvatar(me.id, avatar) : null,
+      banner ? shrinkBanner(banner).then(f => upload('banners', me.id, f)) : null
     ])
     if ((avatar && !a) || (banner && !b)) {
       setBusy(false)

@@ -1,45 +1,13 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import Modal from './Modal'
+import { avatarVariants } from '../lib/image'
 
 const BOX = 300 // viewport (css px)
 const D = 260 // circle diameter (css px)
-const OUT = 512 // exported size (px)
 const MAX_ZOOM = 4
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
-
-function render(img, k, pos, type) {
-  const sw = D / k
-  const sx = img.naturalWidth / 2 - (D / 2 + pos.x) / k
-  const sy = img.naturalHeight / 2 - (D / 2 + pos.y) / k
-  let src = img
-  let x = sx
-  let y = sy
-  let s = sw
-
-  // large sources are reduced in two steps, a single huge downscale looks harsh
-  if (sw > OUT * 2) {
-    const mid = document.createElement('canvas')
-    mid.width = mid.height = OUT * 2
-    const m = mid.getContext('2d')
-    m.imageSmoothingEnabled = true
-    m.imageSmoothingQuality = 'high'
-    m.drawImage(img, sx, sy, sw, sw, 0, 0, OUT * 2, OUT * 2)
-    src = mid
-    x = 0
-    y = 0
-    s = OUT * 2
-  }
-
-  const c = document.createElement('canvas')
-  c.width = c.height = OUT
-  const g = c.getContext('2d')
-  g.imageSmoothingEnabled = true
-  g.imageSmoothingQuality = 'high'
-  g.drawImage(src, x, y, s, s, 0, 0, OUT, OUT)
-  return new Promise(res => c.toBlob(res, type, 0.95))
-}
 
 export default function Cropper({ file, onCancel, onConfirm }) {
   const [url, setUrl] = useState('')
@@ -129,11 +97,15 @@ export default function Cropper({ file, onCancel, onConfirm }) {
     if (!img) return
     setBusy(true)
     const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
-    const blob = await render(img, k, pos, type)
+    const side = D / k // crop side in source pixels
+    const sx = img.naturalWidth / 2 - (D / 2 + pos.x) / k
+    const sy = img.naturalHeight / 2 - (D / 2 + pos.y) / k
+    const v = await avatarVariants(img, sx, sy, side, type)
     setBusy(false)
-    if (!blob) return
-    const name = `avatar.${type === 'image/png' ? 'png' : 'jpg'}`
-    onConfirm(new File([blob], name, { type }))
+    if (!v.l || !v.m || !v.s) return
+    const ext = type === 'image/png' ? 'png' : 'jpg'
+    const mk = (b, n) => new File([b], `avatar_${n}.${ext}`, { type })
+    onConfirm({ l: mk(v.l, 'l'), m: mk(v.m, 'm'), s: mk(v.s, 's') })
     close()
   }
 

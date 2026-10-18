@@ -2,6 +2,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import Avatar from './Avatar'
+import { Icon } from '../lib/icons'
 
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
 if (process.env.NEXT_PUBLIC_TURN_URL) {
@@ -15,6 +16,20 @@ if (process.env.NEXT_PUBLIC_TURN_URL) {
 const PREFS_KEY = 'callprefs'
 const readPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {} } catch { return {} } }
 const writePrefs = p => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)) } catch {} }
+const MIC_KEY = 'callmic'
+const OUT_KEY = 'callout'
+const getSaved = k => { try { return localStorage.getItem(k) || '' } catch { return '' } }
+const setSaved = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k) } catch {} }
+const AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+
+// tries the chosen microphone first and falls back to the default one if it is gone
+async function getMic(id) {
+  if (id) {
+    try { return await navigator.mediaDevices.getUserMedia({ audio: { ...AUDIO, deviceId: { exact: id } } }) } catch {}
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: AUDIO })
+}
+
 const clock = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 const same = (a, b) => {
   const ka = Object.keys(a)
@@ -112,31 +127,77 @@ function Menu({ x, y, name, vol, muted, onVol, onMute, onClose }) {
   )
 }
 
-export default function Call({ conversationId, uid, title, people, onEnd }) {
+function DevicePanel({ inputs, outputs, micId, outId, canOut, onMic, onOut, onClose, className }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const away = e => { if (!ref.current?.contains(e.target) && !e.target.closest?.('[data-devbtn]')) onClose() }
+    const key = e => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('pointerdown', away)
+    document.addEventListener('keydown', key)
+    return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', key) }
+  }, [onClose])
+  const nm = (d, i, w) => d.label || `${w} ${i + 1}`
+  return (
+    <div ref={ref} className={`devpop ${className || ''}`}>
+      <label className="field">
+        Microphone
+        <select value={micId} onChange={e => onMic(e.target.value)}>
+          <option value="">Default</option>
+          {inputs.filter(d => d.deviceId !== 'default').map((d, i) => <option key={d.deviceId} value={d.deviceId}>{nm(d, i, 'Microphone')}</option>)}
+        </select>
+      </label>
+      {canOut && (
+        <label className="field">
+          Speaker
+          <select value={outId} onChange={e => onOut(e.target.value)}>
+            <option value="">Default</option>
+            {outputs.filter(d => d.deviceId !== 'default').map((d, i) => <option key={d.deviceId} value={d.deviceId}>{nm(d, i, 'Speaker')}</option>)}
+          </select>
+        </label>
+      )}
+      {!canOut && <small className="note">Speaker selection is not supported by this browser, it follows the system output.</small>}
+    </div>
+  )
+}
+
+export default function Call({ conversationId, uid, title, people, minimized, onMinimize, onExpand, onEnd }) {
   const [local, setLocal] = useState(null)
   const [remotes, setRemotes] = useState({})
   const [shares, setShares] = useState({})
   const [screen, setScreen] = useState(null)
   const [mic, setMic] = useState(true)
+  const [deaf, setDeaf] = useState(false)
   const [peerMic, setPeerMic] = useState({})
+  const [peerDeaf, setPeerDeaf] = useState({})
   const [speaking, setSpeaking] = useState({})
   const [menu, setMenu] = useState(null)
   const [secs, setSecs] = useState(0)
   const [shareErr, setShareErr] = useState('')
+  const [devOpen, setDevOpen] = useState(false)
+  const [devs, setDevs] = useState({ inputs: [], outputs: [] })
+  const [micId, setMicId] = useState(() => getSaved(MIC_KEY))
+  const [outId, setOutId] = useState(() => getSaved(OUT_KEY))
 
   const stream = useRef(null)
   const screenRef = useRef(null)
   const micRef = useRef(true)
+  const deafRef = useRef(false)
+  const wasOn = useRef(true)
   const pcsRef = useRef({})
   const sendersRef = useRef({})
   const nodesRef = useRef({})
   const ctxRef = useRef(null)
   const api = useRef({})
+  const endRef = useRef(onEnd)
+  endRef.current = onEnd
   const prefsRef = useRef(null)
   if (prefsRef.current === null) prefsRef.current = readPrefs()
   const [prefs, setPrefs] = useState(prefsRef.current)
 
+  const canOut = typeof window !== 'undefined' && typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype
+
   const gainOf = id => {
+    if (deafRef.current && id !== 'local') return 0
     const p = prefsRef.current[id]
     return p?.muted ? 0 : (p?.vol ?? 100) / 100
   }
@@ -144,6 +205,7 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
     const n = nodesRef.current[id]
     if (n?.gain && ctxRef.current) n.gain.gain.setTargetAtTime(gainOf(id), ctxRef.current.currentTime, 0.02)
   }
+  const syncAll = () => Object.keys(nodesRef.current).forEach(syncGain)
   const setPref = (id, patch) => {
     const next = { ...prefsRef.current, [id]: { vol: 100, muted: false, ...prefsRef.current[id], ...patch } }
     prefsRef.current = next
@@ -163,8 +225,18 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
     const ctx = new Ctx()
     ctxRef.current = ctx
     ctx.resume().catch(() => {})
+    const savedOut = getSaved(OUT_KEY)
+    if (savedOut && ctx.setSinkId) ctx.setSinkId(savedOut).catch(() => {})
 
     const send = payload => channel?.send({ type: 'broadcast', event: 'sig', payload: { ...payload, from: uid } })
+    const myState = () => ({ type: 'state', mic: micRef.current, deaf: deafRef.current })
+
+    const refreshDevices = async () => {
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices()
+        if (!closed) setDevs({ inputs: all.filter(d => d.kind === 'audioinput'), outputs: all.filter(d => d.kind === 'audiooutput') })
+      } catch {}
+    }
 
     const release = id => {
       const n = nodes[id]
@@ -207,6 +279,7 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
       release(id)
       setRemotes(r => { const n = { ...r }; delete n[id]; return n })
       setPeerMic(r => { const n = { ...r }; delete n[id]; return n })
+      setPeerDeaf(r => { const n = { ...r }; delete n[id]; return n })
       dropShare(id)
     }
 
@@ -248,7 +321,7 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
       if (m.type === 'hello') {
         drop(m.from)
         make(m.from)
-        send({ type: 'state', to: m.from, mic: micRef.current })
+        send({ ...myState(), to: m.from })
       } else if (m.type === 'desc') {
         const pc = pcs[m.from] || make(m.from)
         const st = pc.st
@@ -265,6 +338,7 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
         try { await pc?.addIceCandidate(m.data) } catch (e) { if (!pc?.st.ignore) throw e }
       } else if (m.type === 'state') {
         setPeerMic(r => ({ ...r, [m.from]: m.mic }))
+        setPeerDeaf(r => ({ ...r, [m.from]: !!m.deaf }))
       } else if (m.type === 'share') {
         if (!m.on) dropShare(m.from)
       } else if (m.type === 'bye') {
@@ -296,22 +370,46 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
       send({ type: 'share', on: false })
     }
 
-    api.current = { send, startShare, stopShare }
+    // swaps the microphone while the call keeps running, nobody has to reconnect
+    const switchMic = async id => {
+      const s = await getMic(id)
+      if (closed) { s.getTracks().forEach(t => t.stop()); return }
+      const nt = s.getAudioTracks()[0]
+      nt.enabled = micRef.current
+      await Promise.all(Object.values(pcs).map(pc => {
+        const sd = pc.getSenders().find(x => x.track?.kind === 'audio')
+        return sd ? sd.replaceTrack(nt).catch(() => {}) : null
+      }))
+      const old = stream.current
+      stream.current = s
+      old?.getTracks().forEach(t => t.stop())
+      setLocal(s)
+      attach('local', s, false)
+      refreshDevices()
+    }
+
+    const setSink = async id => {
+      if (!ctx.setSinkId) return
+      try { await ctx.setSinkId(id || '') } catch {}
+    }
+
+    api.current = { send, myState, startShare, stopShare, switchMic, setSink }
 
     ;(async () => {
-      const s = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      })
+      const s = await getMic(getSaved(MIC_KEY))
       if (closed) { s.getTracks().forEach(t => t.stop()); return }
       stream.current = s
       setLocal(s)
       attach('local', s, false)
+      refreshDevices()
       channel = supabase.channel(`call:${conversationId}`, { config: { broadcast: { self: false } } })
       channel.on('broadcast', { event: 'sig' }, ({ payload }) => {
         queue = queue.then(() => handle(payload)).catch(() => {})
       })
       channel.subscribe(st => { if (st === 'SUBSCRIBED') send({ type: 'hello' }) })
-    })().catch(onEnd)
+    })().catch(e => endRef.current?.(e))
+
+    navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices)
 
     // speaking detection, with a short hold so the ring does not flicker
     const meter = setInterval(() => {
@@ -335,6 +433,7 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
       closed = true
       clearInterval(meter)
       clearInterval(clockTimer)
+      navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices)
       send({ type: 'share', on: false })
       send({ type: 'bye' })
       Object.keys(pcs).forEach(drop)
@@ -347,12 +446,49 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
     }
   }, [conversationId, uid])
 
+  function applyMic(on) {
+    stream.current?.getAudioTracks().forEach(t => { t.enabled = on })
+    micRef.current = on
+    setMic(on)
+  }
+
+  const announce = () => api.current.send?.(api.current.myState())
+
+  function setDeafened(on) {
+    deafRef.current = on
+    setDeaf(on)
+    syncAll()
+  }
+
+  // like Discord: unmuting while deafened also undeafens
   function toggleMic() {
-    const next = !mic
-    stream.current?.getAudioTracks().forEach(t => { t.enabled = next })
-    micRef.current = next
-    setMic(next)
-    api.current.send?.({ type: 'state', mic: next })
+    if (deafRef.current) { setDeafened(false); applyMic(true) } else applyMic(!micRef.current)
+    announce()
+  }
+
+  // deafen silences everyone for you and mutes your mic, undeafen puts the mic back as it was
+  function toggleDeaf() {
+    if (!deafRef.current) {
+      wasOn.current = micRef.current
+      setDeafened(true)
+      applyMic(false)
+    } else {
+      setDeafened(false)
+      if (wasOn.current) applyMic(true)
+    }
+    announce()
+  }
+
+  async function chooseMic(id) {
+    setMicId(id)
+    setSaved(MIC_KEY, id)
+    try { await api.current.switchMic?.(id) } catch { setShareErr('Could not use that microphone') }
+  }
+
+  function chooseOut(id) {
+    setOutId(id)
+    setSaved(OUT_KEY, id)
+    api.current.setSink?.(id)
   }
 
   async function toggleShare() {
@@ -375,6 +511,7 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
     setMenu({ id, x: e.clientX, y: e.clientY })
   }
   const closeMenu = () => setMenu(null)
+  const closeDev = () => setDevOpen(false)
   const sharing = [
     ...(screen ? [[uid, screen, 'Your screen']] : []),
     ...Object.entries(shares).map(([id, s]) => [id, s, `${people[id]?.display_name || 'Someone'}'s screen`])
@@ -382,10 +519,77 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
 
   const badgeOf = id => {
     if (prefs[id]?.muted) return 'Muted by you'
+    if (peerDeaf[id]) return 'Deafened'
     if (peerMic[id] === false) return 'Muted'
     return ''
   }
-  const talkOf = id => !!speaking[id] && !prefs[id]?.muted && peerMic[id] !== false
+  const talkOf = id => !!speaking[id] && !prefs[id]?.muted && peerMic[id] !== false && !peerDeaf[id]
+  const youTalk = mic && !!speaking.local
+  const devProps = {
+    inputs: devs.inputs,
+    outputs: devs.outputs,
+    micId,
+    outId,
+    canOut,
+    onMic: chooseMic,
+    onOut: chooseOut,
+    onClose: closeDev
+  }
+
+  const menuEl = menu && (
+    <Menu
+      x={menu.x}
+      y={menu.y}
+      name={people[menu.id]?.display_name}
+      vol={prefs[menu.id]?.vol ?? 100}
+      muted={!!prefs[menu.id]?.muted}
+      onVol={v => setPref(menu.id, { vol: v })}
+      onMute={() => setPref(menu.id, { muted: !prefs[menu.id]?.muted })}
+      onClose={closeMenu}
+    />
+  )
+
+  // minimized: a small panel that stays on screen while the rest of the app is used
+  if (minimized) {
+    return (
+      <div className="dock">
+        <button className="dockinfo" onClick={onExpand} title="Back to the call">
+          <span className="live" />
+          <span className="dtxt">
+            <b>{title}</b>
+            <small>{ids.length + 1} in call · {clock(secs)}{sharing.length > 0 ? ' · screen' : ''}</small>
+          </span>
+          <span className="dexp"><Icon n="upRight" size={16} /></span>
+        </button>
+        <div className="mavs">
+          {local && <span className={`mav ${youTalk ? 'talk' : ''}`}><Avatar url={people[uid]?.avatar_url} name={people[uid]?.display_name} size={26} /></span>}
+          {ids.slice(0, 6).map(id => (
+            <span key={id} className={`mav ${talkOf(id) ? 'talk' : ''}`}><Avatar url={people[id]?.avatar_url} name={people[id]?.display_name} size={26} /></span>
+          ))}
+        </div>
+        <div className="dbtns">
+          <button className={`ib ${mic ? 'ghost' : 'off'}`} onClick={toggleMic} title={mic ? 'Mute microphone' : 'Unmute microphone'}>
+            <Icon n={mic ? 'mic' : 'micOff'} />
+          </button>
+          <button className={`ib ${deaf ? 'off' : 'ghost'}`} onClick={toggleDeaf} title={deaf ? 'Undeafen' : 'Deafen (mute everyone)'}>
+            <Icon n={deaf ? 'phonesOff' : 'phones'} />
+          </button>
+          <button className={`ib ghost ${devOpen ? 'on' : ''}`} data-devbtn onClick={() => setDevOpen(v => !v)} title="Change microphone / speaker">
+            <Icon n="sliders" />
+          </button>
+          <button className="ib ghost" onClick={onExpand} title="Open the call">
+            <Icon n="upRight" />
+          </button>
+          <button className="ib end" onClick={() => onEnd()} title="Leave call">
+            <Icon n="hangup" />
+          </button>
+        </div>
+        {shareErr && <small className="err cerr">{shareErr}</small>}
+        {devOpen && <DevicePanel {...devProps} className="dockpop" />}
+        {menuEl}
+      </div>
+    )
+  }
 
   const bubbles = (
     <div className="bubbles">
@@ -394,8 +598,8 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
           p={people[uid]}
           you
           small={sharing.length > 0}
-          talking={mic && !!speaking.local}
-          badge={mic ? '' : 'Muted'}
+          talking={youTalk}
+          badge={deaf ? 'Deafened' : mic ? '' : 'Muted'}
           onMenu={openMenu(uid)}
         />
       )}
@@ -415,6 +619,9 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
   return (
     <div className="call">
       <div className="chead">
+        <button className="ghost minbtn" onClick={onMinimize} title="Minimize: keep the call running and use the rest of the app">
+          <Icon n="downLeft" size={16} /> Minimize
+        </button>
         <b>{title}</b>
         <small>{ids.length + 1} in call</small>
         <span className="clock">{clock(secs)}</span>
@@ -431,21 +638,13 @@ export default function Call({ conversationId, uid, title, people, onEnd }) {
       {shareErr && <small className="err cerr">{shareErr}</small>}
       <div className="bar">
         <button className={mic ? 'ghost' : ''} onClick={toggleMic}>{mic ? 'Mute' : 'Unmute'}</button>
+        <button className={deaf ? '' : 'ghost'} onClick={toggleDeaf}>{deaf ? 'Undeafen' : 'Deafen'}</button>
         {canShare && <button className={screen ? '' : 'ghost'} onClick={toggleShare}>{screen ? 'Stop sharing' : 'Share screen'}</button>}
-        <button className="end" onClick={onEnd}>End call</button>
+        <button className={`ghost ${devOpen ? 'on' : ''}`} data-devbtn onClick={() => setDevOpen(v => !v)}>Audio devices</button>
+        <button className="end" onClick={() => onEnd()}>Leave call</button>
+        {devOpen && <DevicePanel {...devProps} className="barpop" />}
       </div>
-      {menu && (
-        <Menu
-          x={menu.x}
-          y={menu.y}
-          name={people[menu.id]?.display_name}
-          vol={prefs[menu.id]?.vol ?? 100}
-          muted={!!prefs[menu.id]?.muted}
-          onVol={v => setPref(menu.id, { vol: v })}
-          onMute={() => setPref(menu.id, { muted: !prefs[menu.id]?.muted })}
-          onClose={closeMenu}
-        />
-      )}
+      {menuEl}
     </div>
   )
 }
