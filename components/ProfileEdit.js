@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import Modal from './Modal'
 import Avatar from './Avatar'
+import Cropper from './Cropper'
 
 const AVATAR_TYPES = ['image/png', 'image/jpeg']
 const BANNER_TYPES = ['image/png', 'image/jpeg', 'image/gif']
@@ -19,6 +20,7 @@ export default function ProfileEdit({ me, onClose }) {
   const [bio, setBio] = useState(me.bio || '')
   const [avatar, setAvatar] = useState(null)
   const [banner, setBanner] = useState(null)
+  const [crop, setCrop] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const avatarSrc = useMemo(() => (avatar ? URL.createObjectURL(avatar) : me.avatar_url), [avatar, me.avatar_url])
@@ -28,6 +30,12 @@ export default function ProfileEdit({ me, onClose }) {
     const f = e.target.files[0]
     e.target.value = ''
     if (f && types.includes(f.type)) set(f)
+  }
+
+  const pickAvatar = e => {
+    const f = e.target.files[0]
+    e.target.value = ''
+    if (f && AVATAR_TYPES.includes(f.type)) setCrop(f)
   }
 
   async function save(close) {
@@ -51,6 +59,7 @@ export default function ProfileEdit({ me, onClose }) {
   }
 
   return (
+    <>
     <Modal onClose={onClose} className="pcard">
       {close => (
         <>
@@ -62,7 +71,7 @@ export default function ProfileEdit({ me, onClose }) {
           <label className="pavatar editable">
             <Avatar url={avatarSrc} name={name} size={94} />
             <span className="overlay">Edit</span>
-            <input type="file" hidden accept="image/png,image/jpeg" onChange={pick(AVATAR_TYPES, setAvatar)} />
+            <input type="file" hidden accept="image/png,image/jpeg" onChange={pickAvatar} />
           </label>
           <div className="pbody">
             <label className="field">
@@ -85,5 +94,7 @@ export default function ProfileEdit({ me, onClose }) {
         </>
       )}
     </Modal>
+    {crop && <Cropper file={crop} onCancel={() => setCrop(null)} onConfirm={f => { setAvatar(f); setCrop(null) }} />}
+    </>
   )
 }
