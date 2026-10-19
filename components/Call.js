@@ -4,10 +4,15 @@ import { supabase } from '../lib/supabase'
 import Avatar from './Avatar'
 import { Icon } from '../lib/icons'
 
-const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
-if (process.env.NEXT_PUBLIC_TURN_URL) {
+// Without a TURN relay, people behind mobile data / CGNAT / strict routers can never reach each other and
+// stay on "Connecting..." forever. NEXT_PUBLIC_TURN_URL accepts several urls separated by commas
+// (turn:host:3478, turn:host:443?transport=tcp, turns:host:443?transport=tcp) so restrictive networks have a way out.
+const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }]
+const turnUrls = (process.env.NEXT_PUBLIC_TURN_URL || '').split(',').map(u => u.trim()).filter(Boolean)
+const HAS_TURN = turnUrls.length > 0
+if (HAS_TURN) {
   iceServers.push({
-    urls: process.env.NEXT_PUBLIC_TURN_URL,
+    urls: turnUrls,
     username: process.env.NEXT_PUBLIC_TURN_USER,
     credential: process.env.NEXT_PUBLIC_TURN_CRED
   })
@@ -358,6 +363,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
 
     const recover = (id, pc) => {
       if (closed || pcs[id] !== pc) return
+      if (!HAS_TURN && !pc.st.warned) { pc.st.warned = true; console.warn('[call] link to', id, 'is not connecting and no TURN server is configured (NEXT_PUBLIC_TURN_URL)') }
       if (offers(id)) {
         if (pc.st.restarts < 1 && pc.connectionState !== 'failed' && pc.restartIce) {
           pc.st.restarts++
