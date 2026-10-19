@@ -51,7 +51,7 @@ create policy "messages read" on messages for select to authenticated using (is_
 create policy "messages insert" on messages for insert to authenticated with check (is_member(conversation_id) and sender_id = auth.uid());
 
 insert into storage.buckets (id, name, public, allowed_mime_types, file_size_limit) values
-  ('avatars', 'avatars', true, array['image/png', 'image/jpeg'], 3145728),
+  ('avatars', 'avatars', true, array['image/png', 'image/jpeg', 'image/gif'], 5242880),
   ('chat-images', 'chat-images', true, array['image/png', 'image/jpeg'], 10485760),
   ('banners', 'banners', true, array['image/png', 'image/jpeg', 'image/gif'], 8388608);
 create policy "upload images" on storage.objects for insert to authenticated

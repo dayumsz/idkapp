@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { info } from '../lib/info'
 import Avatar from './Avatar'
+import { Icon } from '../lib/icons'
 import GroupInfo from './GroupInfo'
 import { Attachment, Once, Pic } from './Media'
 
@@ -137,7 +138,11 @@ export default function Chat({ chat, uid, friends, actions, inCall, roomUsers, o
         <button className="ghost back" onClick={onBack}>Back</button>
         <Avatar url={i.avatar} name={i.name} onClick={other ? () => onProfile(other) : undefined} />
         <b>{i.name}</b>
-        {chat.is_group && <button className="ghost" onClick={() => setShowGroup(true)}>Members</button>}
+        {chat.is_group && (
+          <button className="ghost iconbtn" onClick={() => setShowGroup(true)} title="Group settings" aria-label="Group settings">
+            <Icon n="gear" size={18} />
+          </button>
+        )}
         <button className={inCall ? '' : 'ghost'} onClick={startCall}>{inCall ? 'In call' : live ? 'Join call' : 'Call'}</button>
       </div>
       <div className="msgs">

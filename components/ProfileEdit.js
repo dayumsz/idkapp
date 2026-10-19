@@ -7,7 +7,8 @@ import Cropper from './Cropper'
 import { shrinkBanner } from '../lib/image'
 import { upload, uploadAvatar } from '../lib/upload'
 
-const AVATAR_TYPES = ['image/png', 'image/jpeg']
+const AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/gif']
+const MAX_GIF = 5 * 1024 * 1024
 const BANNER_TYPES = ['image/png', 'image/jpeg', 'image/gif']
 
 export default function ProfileEdit({ me, onClose }) {
@@ -18,7 +19,7 @@ export default function ProfileEdit({ me, onClose }) {
   const [crop, setCrop] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const avatarSrc = useMemo(() => (avatar ? URL.createObjectURL(avatar.m) : me.avatar_url), [avatar, me.avatar_url])
+  const avatarSrc = useMemo(() => (avatar ? URL.createObjectURL(avatar.gif || avatar.m) : me.avatar_url), [avatar, me.avatar_url])
   const bannerSrc = useMemo(() => (banner ? URL.createObjectURL(banner) : me.banner_url), [banner, me.banner_url])
 
   const pick = (types, set) => e => {
@@ -30,7 +31,14 @@ export default function ProfileEdit({ me, onClose }) {
   const pickAvatar = e => {
     const f = e.target.files[0]
     e.target.value = ''
-    if (f && AVATAR_TYPES.includes(f.type)) setCrop(f)
+    if (!f || !AVATAR_TYPES.includes(f.type)) return
+    if (f.type === 'image/gif') {
+      // gifs skip the cropper (it would flatten the animation), the round avatar crops them to the center
+      if (f.size > MAX_GIF) return setErr('GIF too large (max 5 MB)')
+      setErr('')
+      return setAvatar({ gif: f })
+    }
+    setCrop(f)
   }
 
   async function save(close) {
@@ -66,7 +74,7 @@ export default function ProfileEdit({ me, onClose }) {
           <label className="pavatar editable">
             <Avatar url={avatarSrc} name={name} size={94} />
             <span className="overlay">Edit</span>
-            <input type="file" hidden accept="image/png,image/jpeg" onChange={pickAvatar} />
+            <input type="file" hidden accept="image/png,image/jpeg,image/gif" onChange={pickAvatar} />
           </label>
           <div className="pbody">
             <label className="field">

@@ -81,7 +81,7 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
 .empty{margin:auto;color:var(--muted);text-transform:uppercase;letter-spacing:.14em;font-size:12px;animation:wipe .8s steps(24) both}
 .empty.small{margin:20px auto}
 .caret{animation:blink 1s steps(1) infinite;margin-left:2px}
-.modal{position:fixed;inset:0;background:var(--overlay);display:flex;align-items:center;justify-content:center;z-index:5;animation:fade .15s}
+.modal{position:fixed;inset:0;background:var(--overlay);display:flex;align-items:center;justify-content:center;z-index:12;animation:fade .15s}
 .modal.out{opacity:0;transition:opacity .18s}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:20px;padding:18px;width:min(400px,92vw);max-height:92dvh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow);animation:drop .25s cubic-bezier(.2,.8,.2,1)}
 .modal.out .card{transform:translateY(-10px) scale(.98);transition:transform .18s}
@@ -261,3 +261,6 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 .gside .row-btns{flex-wrap:wrap}
 .gside .row-btns button{flex:none}
 .gside button{padding:6px 12px}
+/* popups (profiles, group settings, cropper) sit above the call dock (z 9) and the call screen */
+.iconbtn{display:flex;align-items:center;justify-content:center;flex:none;width:36px;height:36px;padding:0}
+.bar .ib{flex:none;width:54px;height:54px;min-width:0;padding:0;border-radius:50%}

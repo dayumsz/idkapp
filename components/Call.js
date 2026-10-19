@@ -908,11 +908,23 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       </div>
       {shareErr && <small className="err cerr">{shareErr}</small>}
       <div className="bar">
-        <button className={mic ? 'ghost' : ''} onClick={toggleMic}>{mic ? 'Mute' : 'Unmute'}</button>
-        <button className={deaf ? '' : 'ghost'} onClick={toggleDeaf}>{deaf ? 'Undeafen' : 'Deafen'}</button>
-        {canShare && <button className={screen ? '' : 'ghost'} onClick={toggleShare}>{screen ? 'Stop sharing' : 'Share screen'}</button>}
-        <button className={`ghost ${devOpen ? 'on' : ''}`} data-devbtn onClick={() => setDevOpen(v => !v)}>Audio devices</button>
-        <button className="end" onClick={() => onEnd()}>Leave call</button>
+        <button className={`ib ${mic ? 'ghost' : 'off'}`} onClick={toggleMic} title={mic ? 'Mute microphone' : 'Unmute microphone'} aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}>
+          <Icon n={mic ? 'mic' : 'micOff'} size={22} />
+        </button>
+        <button className={`ib ${deaf ? 'off' : 'ghost'}`} onClick={toggleDeaf} title={deaf ? 'Undeafen' : 'Deafen (mute everyone)'} aria-label={deaf ? 'Undeafen' : 'Deafen'}>
+          <Icon n={deaf ? 'phonesOff' : 'phones'} size={22} />
+        </button>
+        {canShare && (
+          <button className={`ib ${screen ? '' : 'ghost'}`} onClick={toggleShare} title={screen ? 'Stop sharing' : 'Share your screen'} aria-label={screen ? 'Stop sharing' : 'Share your screen'}>
+            <Icon n={screen ? 'monitorOff' : 'monitor'} size={22} />
+          </button>
+        )}
+        <button className={`ib ghost ${devOpen ? 'on' : ''}`} data-devbtn onClick={() => setDevOpen(v => !v)} title="Change microphone / speaker" aria-label="Audio devices">
+          <Icon n="sliders" size={22} />
+        </button>
+        <button className="ib end" onClick={() => onEnd()} title="Leave call" aria-label="Leave call">
+          <Icon n="hangup" size={22} />
+        </button>
         {devOpen && <DevicePanel {...devProps} className="barpop" />}
       </div>
       {menuEl}
