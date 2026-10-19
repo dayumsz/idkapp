@@ -264,3 +264,46 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 /* popups (profiles, group settings, cropper) sit above the call dock (z 9) and the call screen */
 .iconbtn{display:flex;align-items:center;justify-content:center;flex:none;width:36px;height:36px;padding:0}
 .bar .ib{flex:none;width:54px;height:54px;min-width:0;padding:0;border-radius:50%}
+
+
+/* Chat message actions, replies, GIF embeds and delivery receipts */
+.msg{position:relative;padding-right:30px}
+.message-more{position:absolute;right:4px;top:4px;width:25px;height:24px;padding:0;border-radius:7px;opacity:0;line-height:1;font-size:19px;letter-spacing:0;z-index:3}
+.msg:hover .message-more,.message-more:focus-visible{opacity:1}
+.mrow.me .message-more{color:var(--on-accent);border-color:color-mix(in srgb,var(--on-accent) 22%,transparent)}
+.message-meta{display:flex;justify-content:flex-end;align-items:center;gap:6px;margin-top:3px}
+.message-meta .time{margin:0}
+.receipt{font-size:9px;opacity:.7;white-space:nowrap}
+.message-menu{position:fixed;z-index:1000;min-width:175px;display:flex;flex-direction:column;padding:5px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:11px;box-shadow:var(--shadow)}
+.message-menu button{background:transparent;color:var(--text);border:0;text-align:left;text-transform:none;letter-spacing:0;font-size:12px;border-radius:7px;padding:9px 10px}
+.message-menu button:hover{background:var(--hover);box-shadow:none;transform:none}
+.message-menu button.danger{color:var(--danger)}
+.menu-dismiss{position:fixed;inset:0;z-index:999;background:transparent}
+.reply-preview{display:flex;flex-direction:column;border-left:3px solid var(--muted);padding:4px 8px;margin:0 0 7px;background:color-mix(in srgb,var(--bg) 35%,transparent);border-radius:4px;font-size:11px}
+.reply-preview b{font-size:10px}
+.reply-preview span{opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.deleted-msg{opacity:.65;font-style:italic}
+.reply-bar{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);border-top:1px solid var(--border)}
+.reply-bar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reply-bar button{padding:4px 8px}
+.embedded-gif{display:block;width:auto;height:auto;max-width:min(360px,100%);max-height:300px;object-fit:contain;border-radius:10px;margin:4px 0}
+.embed-link{display:block;font-size:10px;opacity:.7;overflow-wrap:anywhere}
+.gif-wrap{position:relative;display:inline-block;max-width:100%}
+.gif-wrap .embedded-gif{margin:0}
+.gif-heart{position:absolute;top:7px;right:7px;width:30px;height:30px;padding:0;border-radius:50%;background:#000b;color:#fff;border-color:#ffffff55;font-size:19px;line-height:1;opacity:0;transition:opacity .15s}
+.gif-wrap:hover .gif-heart,.gif-heart:focus-visible{opacity:1}
+.gif-picker{position:absolute;z-index:20;right:14px;bottom:68px;width:min(360px,calc(100vw - 28px));max-height:55%;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:10px;box-shadow:var(--shadow)}
+.gif-picker-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.gif-picker-head button{padding:5px 8px}
+.gif-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.gif-option{position:relative;min-width:0}
+.gif-option-image{display:block;width:100%;height:88px;padding:0;background:transparent;border:1px solid var(--border);overflow:hidden}
+.gif-option-image img{width:100%;height:100%;object-fit:cover}
+.gif-remove{position:absolute;right:3px;top:3px;padding:2px 5px;background:#000b;color:#fff;border-radius:50%;font-size:15px}
+.compose .gif-toggle{flex:none}
+.spoiler-wrap .pic{position:relative}
+.spoiler-wrap .spoiltag{left:50%!important;right:auto!important;top:50%!important;bottom:auto!important;transform:translate(-50%,-50%)!important;white-space:nowrap}
+@media (hover:none){.message-more{opacity:.8}.gif-heart{opacity:1}}
+@media(max-width:600px){.mrow{max-width:92%}.message-menu{max-width:calc(100vw - 16px)}.gif-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.saved-message{display:flex;align-items:center;gap:8px;padding:7px 3px;border-bottom:1px solid var(--border)}.saved-message span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.saved-message button{padding:3px 7px}
