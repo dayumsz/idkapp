@@ -31,8 +31,14 @@ export default function Main({ session }) {
   const [expanded, setExpanded] = useState(true)
   const [rooms, setRooms] = useState({}) // conversation id -> user ids currently in its call
   const [notice, setNotice] = useState('')
+  const [pinned, setPinned] = useState([])
+  const [favoriteChat, setFavoriteChat] = useState(null)
+  const [favoriteMessages, setFavoriteMessages] = useState([])
   const roomsRef = useRef({})
   const active = chats.find(c => c.id === activeId) || null
+  useEffect(() => { try { setPinned(JSON.parse(localStorage.getItem(`pinned-chats:${uid}`) || '[]')) } catch { setPinned([]) } }, [uid])
+  const togglePin = cid => setPinned(current => { const next = current.includes(cid) ? current.filter(id => id !== cid) : [...current, cid]; try { localStorage.setItem(`pinned-chats:${uid}`, JSON.stringify(next)) } catch {} return next })
+  const showFavorites = async cid => { const { data: fav } = await supabase.from('message_favorites').select('message_id').eq('user_id', uid); const ids = (fav || []).map(x => x.message_id); if (!ids.length) { setFavoriteMessages([]); setFavoriteChat(cid); return } const { data } = await supabase.from('messages').select('*').in('id', ids).eq('conversation_id', cid).order('created_at'); setFavoriteMessages(data || []); setFavoriteChat(cid) }
   const callChat = call ? chats.find(c => c.id === call) || null : null
 
   const loadMe = useCallback(async () => {
@@ -218,12 +224,13 @@ export default function Main({ session }) {
           <div className="list pane" key="chats">
             <button className="ghost wide" onClick={() => setPanel('group')}>New group</button>
             {chats.length === 0 && <p className="note">No chats yet. Add a friend, then message them.</p>}
-            {chats.map((c, n) => {
+            {[...chats].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id))).map((c, n) => {
               const i = info(c, uid)
               return (
                 <div key={c.id} className={`row ${activeId === c.id ? 'sel' : ''}`} style={{ '--i': n }} onClick={() => setActiveId(c.id)}>
                   <Avatar url={i.avatar} name={i.name} />
                   <span>{i.name}</span>
+                  {pinned.includes(c.id) && <small className="pin-mark" title="Pinned">◆</small>}
                   {c.is_group && <small className="tag">group</small>}
                   {call === c.id && <small className="tag inlive">in call</small>}
                 </div>
@@ -248,9 +255,19 @@ export default function Main({ session }) {
               onOpenCall={() => setExpanded(true)}
               onBack={() => setActiveId(null)}
               onProfile={setViewing}
+              pinned={pinned.includes(active.id)}
+              onTogglePin={() => togglePin(active.id)}
+              onShowFavorites={() => showFavorites(active.id)}
+              dismissKey={`${viewing?.id || ''}|${panel || ''}|${call || ''}|${favoriteChat || ''}`}
             />
           : <div className="empty">No chat selected<span className="caret">_</span></div>}
       </main>
+      {favoriteChat && (
+        <div className="favorite-conversation">
+          <div className="gif-picker-head"><b>Favorite messages</b><button className="ghost" onClick={() => setFavoriteChat(null)}>Close</button></div>
+          {favoriteMessages.length ? favoriteMessages.map(m => <article key={m.id}><small>{new Date(m.created_at).toLocaleString()}</small><div>{m.deleted_at ? 'Message deleted' : m.body || m.gif_url || (m.video_url ? 'Video' : m.image_url ? 'Image' : 'Attachment')}</div></article>) : <p className="note">No favorite messages in this conversation.</p>}
+        </div>
+      )}
       {viewing && (
         <ProfileCard
           profile={viewing.id === uid && me ? me : viewing}

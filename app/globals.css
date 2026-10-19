@@ -290,6 +290,8 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 .embed-link{display:block;font-size:10px;opacity:.7;overflow-wrap:anywhere}
 .gif-wrap{position:relative;display:inline-block;max-width:100%}
 .gif-wrap .embedded-gif{margin:0}
+.embedded-gif-frame{width:min(360px,100%);height:260px;border:0;background:transparent}
+.gif-option-image iframe{display:block;width:100%;height:88px;border:0;pointer-events:none}
 .gif-heart{position:absolute;top:7px;right:7px;width:30px;height:30px;padding:0;border-radius:50%;background:#000b;color:#fff;border-color:#ffffff55;font-size:19px;line-height:1;opacity:0;transition:opacity .15s}
 .gif-wrap:hover .gif-heart,.gif-heart:focus-visible{opacity:1}
 .gif-picker{position:absolute;z-index:20;right:14px;bottom:68px;width:min(360px,calc(100vw - 28px));max-height:55%;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:10px;box-shadow:var(--shadow)}
@@ -307,3 +309,39 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 @media(max-width:600px){.mrow{max-width:92%}.message-menu{max-width:calc(100vw - 16px)}.gif-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
 .saved-message{display:flex;align-items:center;gap:8px;padding:7px 3px;border-bottom:1px solid var(--border)}.saved-message span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.saved-message button{padding:3px 7px}
+
+/* Media appearance */
+.msg .media-frame,.msg .spoiler-wrap,.msg .spoiler-wrap .pic,.msg .pic{display:inline-block;max-width:100%;padding:0!important;margin:0!important;border:0!important;background:transparent!important;box-shadow:none!important;border-radius:14px!important;overflow:hidden}
+.msg .media-frame img,.msg .media-frame video,.msg .spoiler-wrap img,.msg .pic img{display:block;max-width:min(100%,420px);height:auto;border:0!important;outline:0!important;box-shadow:none!important;border-radius:14px!important;margin:0!important}
+.chat-video{width:min(420px,100%);max-height:360px;background:#000;object-fit:contain}
+.media-picker{z-index:40}
+.media-tabs{display:flex;gap:6px;margin:10px 0}
+.media-tabs button{flex:1;border:1px solid var(--border);border-radius:9px;padding:8px;background:var(--panel2);color:var(--text)}
+.media-tabs button.on{background:var(--accent);color:var(--on-accent)}
+.media-upload{padding:18px 4px;text-align:center}
+.media-upload-button{display:inline-flex;padding:11px 15px;border:1px solid var(--border);border-radius:10px;cursor:pointer;background:var(--panel2)}
+.media-toggle{white-space:nowrap}
+.gif-heart{width:34px!important;height:34px!important;display:grid;place-items:center;border:0!important;background:#111c!important;border-radius:50%!important;opacity:0;line-height:1!important}
+.gif-heart svg{width:19px;height:19px}
+.row .pin-mark{flex:0 0 auto;color:var(--accent);font-size:12px}
+.favorite-conversation{position:absolute;z-index:25;inset:58px 12px 12px;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px;overflow:auto}
+.favorite-conversation article{padding:10px;margin:6px 0;background:var(--panel2);border-radius:9px;overflow-wrap:anywhere}
+
+/* gear + options menu in the chat top bar (same slot as the old group gear, next to Call) */
+.top{position:relative}
+.top-gear{position:relative;flex:none;display:flex}
+.top-dismiss{position:fixed;inset:0;z-index:40}
+.top-menu{position:absolute;z-index:41;right:0;top:calc(100% + 8px);min-width:210px;display:flex;flex-direction:column;padding:6px;background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow)}
+.top-menu button{background:transparent;color:var(--text);border:0;text-align:left;text-transform:none;letter-spacing:0;font-size:13px;border-radius:7px;padding:10px;white-space:nowrap}
+.top-menu button:hover{background:var(--hover);box-shadow:none;transform:none}
+
+/* photos, videos and GIFs: no bubble, no border */
+.msg.bare,.mrow.me .msg.bare{background:transparent;border:0;box-shadow:none;padding:0;border-radius:0}
+.msg.bare .reply-preview{background:var(--panel2);color:var(--text);border-radius:8px}
+.msg.bare .message-body{display:inline-block;margin-top:4px;padding:7px 12px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:14px}
+.mrow.me .msg.bare .message-body{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.msg.bare .message-meta{color:var(--muted);margin-top:2px}
+.mrow.me .msg.bare .message-meta,.mrow.me .msg.bare .message-meta *{color:var(--muted)}
+.msg.bare .message-more{left:6px;right:auto;top:6px;background:#000a;color:#fff;border:0}
+.mrow.me .msg.bare .message-more{color:#fff;border:0}
+.msg.bare .embedded-gif{margin:0}
