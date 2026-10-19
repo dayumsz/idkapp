@@ -252,4 +252,12 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
   .minbtn{padding:6px 10px}
   .bar button{min-width:0;flex:1 1 40%;padding:10px 12px}
 }
-@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-delay:0s!important;transition-duration:.01ms!important}}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-delay:0s!important;transition-duration:.01ms!important}}.gicon{display:flex;align-items:center;gap:14px}
+.gpic{position:relative;flex:none;display:block;width:72px;height:72px;border-radius:50%;overflow:hidden}
+.gpic .av{display:flex}
+.gpic .overlay{border-radius:50%}
+.gside{display:flex;flex-direction:column;gap:8px;min-width:0;align-items:flex-start}
+.gside h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.gside .row-btns{flex-wrap:wrap}
+.gside .row-btns button{flex:none}
+.gside button{padding:6px 12px}

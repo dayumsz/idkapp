@@ -10,6 +10,7 @@ import NewGroup from './NewGroup'
 import ProfileCard from './ProfileCard'
 import ProfileEdit from './ProfileEdit'
 import ThemePicker from './ThemePicker'
+import { uploadAvatar } from '../lib/upload'
 
 const rpc = async (fn, args) => {
   const { data, error } = await supabase.rpc(fn, args)
@@ -42,7 +43,7 @@ export default function Main({ session }) {
   const loadChats = useCallback(async () => {
     const { data } = await supabase
       .from('members')
-      .select(`conversations(id,name,is_group,owner_id,created_at,members(profiles(${PROFILE_COLS})))`)
+      .select(`conversations(id,name,is_group,owner_id,icon_url,created_at,members(profiles(${PROFILE_COLS})))`)
       .eq('user_id', uid)
     setChats((data || []).map(r => r.conversations).filter(Boolean))
   }, [uid])
@@ -62,6 +63,7 @@ export default function Main({ session }) {
       .channel(`sync:${uid}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'members', filter: `user_id=eq.${uid}` }, loadChats)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, loadRels)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' }, loadChats)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [uid, loadMe, loadChats, loadRels])
@@ -161,12 +163,28 @@ export default function Main({ session }) {
       setActiveId(r.data)
       setTab('chats')
     },
-    async createGroup(name, ids) {
+    async createGroup(name, ids, icon) {
       const r = await rpc('create_group', { group_name: name, member_ids: ids })
       if (r.error) return r.error
+      if (icon) {
+        const e = await actions.setGroupIcon(r.data, icon)
+        if (e) setNotice('Group created, but the icon could not be saved')
+      }
       await loadChats()
       setActiveId(r.data)
       setPanel(null)
+      return null
+    },
+    // icon = the three cropped sizes from the Cropper, or null to remove the icon
+    async setGroupIcon(cid, icon) {
+      let url = null
+      if (icon) {
+        url = await uploadAvatar(uid, icon, 'group_')
+        if (!url) return 'Icon upload failed'
+      }
+      const r = await rpc('set_group_icon', { cid, url })
+      if (r.error) return r.error
+      await loadChats()
       return null
     },
     async addMember(cid, id) {

@@ -5,27 +5,10 @@ import Modal from './Modal'
 import Avatar from './Avatar'
 import Cropper from './Cropper'
 import { shrinkBanner } from '../lib/image'
+import { upload, uploadAvatar } from '../lib/upload'
 
 const AVATAR_TYPES = ['image/png', 'image/jpeg']
 const BANNER_TYPES = ['image/png', 'image/jpeg', 'image/gif']
-const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif' }
-
-async function upload(bucket, uid, file, name = String(Date.now())) {
-  const path = `${uid}/${name}.${EXT[file.type]}`
-  const { error } = await supabase.storage.from(bucket).upload(path, file, { contentType: file.type, cacheControl: '31536000' })
-  return error ? null : supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl
-}
-
-// avatar is stored in 3 sizes (_l 512px, _m 256px, _s 128px), Avatar picks the best one for each place
-async function uploadAvatar(uid, v) {
-  const t = Date.now()
-  const [l, m, s] = await Promise.all([
-    upload('avatars', uid, v.l, `${t}_l`),
-    upload('avatars', uid, v.m, `${t}_m`),
-    upload('avatars', uid, v.s, `${t}_s`)
-  ])
-  return l && m && s ? l : null
-}
 
 export default function ProfileEdit({ me, onClose }) {
   const [name, setName] = useState(me.display_name)

@@ -20,6 +20,8 @@ const MIC_KEY = 'callmic'
 const OUT_KEY = 'callout'
 const getSaved = k => { try { return localStorage.getItem(k) || '' } catch { return '' } }
 const setSaved = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k) } catch {} }
+// Safari does not play remote WebRTC audio through WebAudio, there the audio element does all the work
+const EL_ONLY = typeof navigator !== 'undefined' && /^((?!chrome|chromium|android|crios|fxios).)*safari/i.test(navigator.userAgent)
 const AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
 
 // tries the chosen microphone first and falls back to the default one if it is gone
@@ -30,6 +32,7 @@ async function getMic(id) {
   return navigator.mediaDevices.getUserMedia({ audio: AUDIO })
 }
 
+const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 const clock = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 const same = (a, b) => {
   const ka = Object.keys(a)
@@ -162,7 +165,7 @@ function DevicePanel({ inputs, outputs, micId, outId, canOut, onMic, onOut, onCl
 
 export default function Call({ conversationId, uid, title, people, minimized, onMinimize, onExpand, onEnd }) {
   const [local, setLocal] = useState(null)
-  const [remotes, setRemotes] = useState({})
+  const [members, setMembers] = useState({}) // uid -> 'connecting' | 'connected'
   const [shares, setShares] = useState({})
   const [screen, setScreen] = useState(null)
   const [mic, setMic] = useState(true)
@@ -201,9 +204,20 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     const p = prefsRef.current[id]
     return p?.muted ? 0 : (p?.vol ?? 100) / 100
   }
+  // normally the audio engine plays everything (so the volume can pass 100%). If the browser keeps it
+  // asleep, the plain audio element takes over so you never end up with a person you cannot hear.
   const syncGain = id => {
     const n = nodesRef.current[id]
-    if (n?.gain && ctxRef.current) n.gain.gain.setTargetAtTime(gainOf(id), ctxRef.current.currentTime, 0.02)
+    const ctx = ctxRef.current
+    if (!n || !ctx) return
+    const g = gainOf(id)
+    const viaCtx = ctx.state === 'running' && !EL_ONLY
+    if (n.gain) n.gain.gain.setTargetAtTime(viaCtx ? g : 0, ctx.currentTime, 0.02)
+    if (n.el) {
+      n.el.volume = Math.min(1, g)
+      n.el.muted = viaCtx || g === 0
+      if (!n.el.muted && n.el.paused) n.el.play().catch(() => {})
+    }
   }
   const syncAll = () => Object.keys(nodesRef.current).forEach(syncGain)
   const setPref = (id, patch) => {
@@ -217,10 +231,17 @@ export default function Call({ conversationId, uid, title, people, minimized, on
   useEffect(() => {
     let channel
     let closed = false
+    let subscribedOnce = false
     let queue = Promise.resolve()
+    const sid = newId() // identifies this visit to the call, a rejoin always gets a new one
+    const joinedAt = Date.now()
     const pcs = pcsRef.current
     const senders = sendersRef.current
     const nodes = nodesRef.current
+    const roster = {} // uid -> { sid, t } people currently in the call (from realtime presence)
+    const gone = new Set() // sessions that said goodbye, anything they still send is stale
+    const waits = {} // uid -> timer, asks the other side to (re)start the link when it never arrives
+    const early = {} // ice candidates that arrived before their offer
     const Ctx = window.AudioContext || window.webkitAudioContext
     const ctx = new Ctx()
     ctxRef.current = ctx
@@ -228,8 +249,18 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     const savedOut = getSaved(OUT_KEY)
     if (savedOut && ctx.setSinkId) ctx.setSinkId(savedOut).catch(() => {})
 
-    const send = payload => channel?.send({ type: 'broadcast', event: 'sig', payload: { ...payload, from: uid } })
+    // Only one side of each pair creates the link (the bigger id), the other one just follows.
+    // That removes the old "both sides rebuild at the same time" collisions that left one side deaf.
+    const offers = id => uid > id
+
+    const send = payload => {
+      try {
+        const r = channel?.send({ type: 'broadcast', event: 'sig', payload: { ...payload, from: uid, fsid: sid } })
+        if (r && r.catch) r.catch(() => {})
+      } catch {}
+    }
     const myState = () => ({ type: 'state', mic: micRef.current, deaf: deafRef.current })
+    const sendState = (to, tsid) => send({ ...myState(), to, tsid })
 
     const refreshDevices = async () => {
       try {
@@ -238,15 +269,27 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       } catch {}
     }
 
+    // browsers keep the audio engine asleep until the user interacts, wake it on every chance
+    const wake = () => {
+      if (closed) return
+      if (ctx.state !== 'running') ctx.resume().catch(() => {})
+      Object.values(nodes).forEach(n => { if (n.el && n.el.paused) n.el.play().catch(() => {}) })
+    }
+    ctx.onstatechange = () => { syncAll(); if (ctx.state !== 'running') wake() }
+    const wakeEvents = ['pointerdown', 'keydown', 'touchend', 'click']
+    wakeEvents.forEach(e => window.addEventListener(e, wake, true))
+    document.addEventListener('visibilitychange', wake)
+
     const release = id => {
       const n = nodes[id]
       if (!n) return
       try { n.src.disconnect(); n.an.disconnect(); n.gain?.disconnect() } catch {}
-      if (n.el) n.el.srcObject = null
+      if (n.el) { n.el.pause(); n.el.srcObject = null }
       delete nodes[id]
     }
 
-    // remote audio goes through a gain node so the volume can go above 100%
+    // remote audio goes through a gain node so the volume can go above 100%.
+    // If the audio engine is not running, a plain audio element plays it instead (see syncGain).
     const attach = (id, s, remote) => {
       release(id)
       const src = ctx.createMediaStreamSource(s)
@@ -258,8 +301,11 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       if (remote) {
         // Chromium only delivers remote WebRTC audio to WebAudio when a media element holds the stream
         el = new Audio()
+        el.autoplay = true
         el.srcObject = s
         el.muted = true
+        const out = getSaved(OUT_KEY)
+        if (out && el.setSinkId) el.setSinkId(out).catch(() => {})
         el.play().catch(() => {})
         gain = ctx.createGain()
         src.connect(gain)
@@ -267,83 +313,259 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       }
       nodes[id] = { src, an, gain, el, data: new Uint8Array(an.fftSize), last: 0 }
       syncGain(id)
+      wake()
     }
 
     const dropShare = id => setShares(r => { if (!r[id]) return r; const n = { ...r }; delete n[id]; return n })
+    const setMember = (id, state) => setMembers(m => (m[id] === state ? m : { ...m, [id]: state }))
 
-    const drop = id => {
+    // keep = true when the link is only being rebuilt and the person is still in the call
+    const drop = (id, keep) => {
       const pc = pcs[id]
-      if (pc) { pc.onconnectionstatechange = null; pc.close() }
+      if (pc) {
+        clearTimeout(pc.st.watch)
+        clearTimeout(pc.st.dis)
+        clearTimeout(pc.st.ft)
+        pc.onconnectionstatechange = null
+        pc.ontrack = null
+        pc.onicecandidate = null
+        pc.onnegotiationneeded = null
+        try { pc.close() } catch {}
+      }
       delete pcs[id]
       delete senders[id]
       release(id)
-      setRemotes(r => { const n = { ...r }; delete n[id]; return n })
-      setPeerMic(r => { const n = { ...r }; delete n[id]; return n })
-      setPeerDeaf(r => { const n = { ...r }; delete n[id]; return n })
       dropShare(id)
+      if (keep) {
+        setMembers(m => (m[id] ? { ...m, [id]: 'connecting' } : m))
+      } else {
+        clearTimeout(waits[id])
+        delete waits[id]
+        setMembers(r => { if (!r[id]) return r; const n = { ...r }; delete n[id]; return n })
+        setPeerMic(r => { const n = { ...r }; delete n[id]; return n })
+        setPeerDeaf(r => { const n = { ...r }; delete n[id]; return n })
+      }
+    }
+
+    // a link that does not reach "connected" is retried: first an ICE restart, then a brand new link
+    const arm = (id, pc, ms = 9000) => {
+      clearTimeout(pc.st.watch)
+      pc.st.watch = setTimeout(() => {
+        if (closed || pcs[id] !== pc || pc.connectionState === 'connected') return
+        recover(id, pc)
+      }, ms)
+    }
+
+    const recover = (id, pc) => {
+      if (closed || pcs[id] !== pc) return
+      if (offers(id)) {
+        if (pc.st.restarts < 1 && pc.connectionState !== 'failed' && pc.restartIce) {
+          pc.st.restarts++
+          try { pc.restartIce() } catch {}
+          arm(id, pc)
+        } else {
+          connect(id, pc.rsid)
+        }
+      } else {
+        send({ type: 'redo', to: id, tsid: pc.rsid })
+        arm(id, pc)
+      }
     }
 
     // perfect negotiation: both sides may renegotiate (screen share) without colliding
-    const make = id => {
+    const make = (id, rsid, lid) => {
       const pc = new RTCPeerConnection({ iceServers })
-      const st = { making: false, ignore: false, polite: uid < id }
+      const st = { making: false, ignore: false, polite: uid < id, pending: [], out: [], ft: null, watch: null, dis: null, restarts: 0, born: Date.now() }
       pc.st = st
+      pc.lid = lid
+      pc.rsid = rsid
       stream.current.getTracks().forEach(t => pc.addTrack(t, stream.current))
       if (screenRef.current) {
         const t = screenRef.current.getVideoTracks()[0]
         senders[id] = [pc.addTrack(t, screenRef.current)]
       }
-      pc.onicecandidate = e => e.candidate && send({ type: 'ice', to: id, data: e.candidate })
+      const flush = () => {
+        clearTimeout(st.ft)
+        st.ft = null
+        if (!st.out.length) return
+        const data = st.out
+        st.out = []
+        send({ type: 'ice', to: id, tsid: rsid, lid, data })
+      }
+      // candidates are sent in small batches, one message each would hit the realtime rate limit
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          st.out.push(e.candidate.toJSON())
+          if (!st.ft) st.ft = setTimeout(flush, 60)
+        } else flush()
+      }
       pc.onnegotiationneeded = async () => {
+        if (pcs[id] !== pc) return
         try {
           st.making = true
           await pc.setLocalDescription()
-          send({ type: 'desc', to: id, data: pc.localDescription })
+          if (pcs[id] !== pc) return
+          const d = pc.localDescription
+          send({ type: 'desc', to: id, tsid: rsid, lid, data: { type: d.type, sdp: d.sdp } })
         } catch {} finally { st.making = false }
       }
       pc.ontrack = e => {
+        if (pcs[id] !== pc) return
+        const s = e.streams[0] || new MediaStream([e.track])
         if (e.track.kind === 'audio') {
-          setRemotes(r => ({ ...r, [id]: e.streams[0] }))
-          attach(id, e.streams[0], true)
+          attach(id, s, true)
         } else {
-          setShares(r => ({ ...r, [id]: e.streams[0] }))
+          setShares(r => ({ ...r, [id]: s }))
+          s.addEventListener('removetrack', () => dropShare(id))
         }
       }
       pc.onconnectionstatechange = () => {
-        if (pcs[id] === pc && ['failed', 'closed'].includes(pc.connectionState)) drop(id)
+        if (pcs[id] !== pc) return
+        const cs = pc.connectionState
+        if (cs === 'connected') {
+          clearTimeout(st.watch)
+          clearTimeout(st.dis)
+          setMember(id, 'connected')
+          sendState(id, rsid)
+          wake()
+        } else if (cs === 'failed') {
+          setMember(id, 'connecting')
+          recover(id, pc)
+        } else if (cs === 'disconnected') {
+          setMember(id, 'connecting')
+          clearTimeout(st.dis)
+          st.dis = setTimeout(() => { if (pcs[id] === pc && pc.connectionState !== 'connected') recover(id, pc) }, 4000)
+        } else if (cs === 'closed') {
+          clearTimeout(st.watch)
+        }
       }
       pcs[id] = pc
+      setMembers(m => (m[id] ? m : { ...m, [id]: 'connecting' }))
+      arm(id, pc)
+      sendState(id, rsid)
       return pc
     }
 
+    // I am the one who starts this link
+    const connect = (id, rsid) => {
+      if (closed || !stream.current) return
+      drop(id, true)
+      make(id, rsid, newId())
+    }
+
+    // I am the one who waits: if the other side never sends its offer, ask for it again
+    const expect = id => {
+      if (waits[id]) return
+      const again = () => {
+        waits[id] = null
+        if (closed) return
+        const r = roster[id]
+        if (!r) return
+        const pc = pcs[id]
+        if (pc && pc.rsid === r.sid && pc.connectionState === 'connected') return
+        if (!pc || pc.rsid !== r.sid) send({ type: 'redo', to: id, tsid: r.sid })
+        waits[id] = setTimeout(again, 6000)
+      }
+      waits[id] = setTimeout(again, 4500)
+    }
+
+    const ensure = id => {
+      const r = roster[id]
+      if (closed || !r || !stream.current) return
+      setMembers(m => (m[id] ? m : { ...m, [id]: 'connecting' }))
+      const pc = pcs[id]
+      if (offers(id)) {
+        if (!pc || pc.rsid !== r.sid) connect(id, r.sid)
+      } else {
+        if (pc && pc.rsid !== r.sid) drop(id, true)
+        expect(id)
+      }
+    }
+
+    const drain = async pc => {
+      const list = pc.st.pending.splice(0)
+      for (const c of list) {
+        try { await pc.addIceCandidate(c) } catch {}
+      }
+    }
+
     const handle = async m => {
-      if (closed || (m.to && m.to !== uid)) return
-      if (m.type === 'hello') {
-        drop(m.from)
-        make(m.from)
-        send({ ...myState(), to: m.from })
-      } else if (m.type === 'desc') {
-        const pc = pcs[m.from] || make(m.from)
+      if (closed || !m || !m.from || m.from === uid) return
+      if (m.to && m.to !== uid) return
+      if (m.tsid && m.tsid !== sid) return
+      if (gone.has(m.fsid)) return
+      const id = m.from
+
+      if (m.type === 'desc') {
+        const d = m.data
+        let pc = pcs[id]
+        if (!pc || pc.lid !== m.lid) {
+          // the side that owns the link only listens to its own link; the other side follows any new offer
+          if (offers(id) || d.type !== 'offer' || !stream.current) return
+          drop(id, true)
+          pc = make(id, m.fsid, m.lid)
+          const k = `${id}:${m.lid}`
+          if (early[k]) { pc.st.pending.push(...early[k]); delete early[k] }
+        }
         const st = pc.st
-        const collision = m.data.type === 'offer' && (st.making || pc.signalingState !== 'stable')
+        const collision = d.type === 'offer' && (st.making || pc.signalingState !== 'stable')
         st.ignore = !st.polite && collision
         if (st.ignore) return
-        await pc.setRemoteDescription(m.data)
-        if (m.data.type === 'offer') {
+        await pc.setRemoteDescription(d)
+        await drain(pc)
+        if (d.type === 'offer') {
           await pc.setLocalDescription()
-          send({ type: 'desc', to: m.from, data: pc.localDescription })
+          if (pcs[id] !== pc) return
+          const a = pc.localDescription
+          send({ type: 'desc', to: id, tsid: m.fsid, lid: m.lid, data: { type: a.type, sdp: a.sdp } })
         }
       } else if (m.type === 'ice') {
-        const pc = pcs[m.from]
-        try { await pc?.addIceCandidate(m.data) } catch (e) { if (!pc?.st.ignore) throw e }
+        const list = Array.isArray(m.data) ? m.data : [m.data]
+        const pc = pcs[id]
+        if (!pc || pc.lid !== m.lid) {
+          const k = `${id}:${m.lid}`
+          early[k] = [...(early[k] || []), ...list]
+          return
+        }
+        if (!pc.remoteDescription) { pc.st.pending.push(...list); return }
+        for (const c of list) {
+          try { await pc.addIceCandidate(c) } catch {}
+        }
+      } else if (m.type === 'redo') {
+        // the other side is waiting for me to start the link
+        if (!offers(id)) return
+        const pc = pcs[id]
+        if (pc && pc.rsid === m.fsid && Date.now() - pc.st.born < 3500) return
+        if (!roster[id] || roster[id].sid !== m.fsid) roster[id] = { sid: m.fsid, t: Date.now() }
+        connect(id, m.fsid)
       } else if (m.type === 'state') {
-        setPeerMic(r => ({ ...r, [m.from]: m.mic }))
-        setPeerDeaf(r => ({ ...r, [m.from]: !!m.deaf }))
+        setPeerMic(r => ({ ...r, [id]: m.mic }))
+        setPeerDeaf(r => ({ ...r, [id]: !!m.deaf }))
       } else if (m.type === 'share') {
-        if (!m.on) dropShare(m.from)
+        if (!m.on) dropShare(id)
       } else if (m.type === 'bye') {
-        drop(m.from)
+        gone.add(m.fsid)
+        if (roster[id]?.sid === m.fsid) delete roster[id]
+        if (pcs[id]?.rsid === m.fsid) drop(id)
+        else if (!roster[id] && !pcs[id]) drop(id)
       }
+    }
+
+    const readRoster = () => {
+      const next = {}
+      for (const metas of Object.values(channel.presenceState())) {
+        for (const p of metas) {
+          if (!p.uid || p.uid === uid || p.sid === sid || gone.has(p.sid)) continue
+          if (!next[p.uid] || (p.t || 0) > next[p.uid].t) next[p.uid] = { sid: p.sid, t: p.t || 0 }
+        }
+      }
+      return next
+    }
+
+    const syncRoster = () => {
+      if (closed || !channel) return
+      const next = readRoster()
+      Object.keys(next).forEach(id => { roster[id] = next[id]; ensure(id) })
     }
 
     const startShare = async () => {
@@ -389,6 +611,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     }
 
     const setSink = async id => {
+      Object.values(nodes).forEach(n => { try { n.el?.setSinkId?.(id || '')?.catch?.(() => {}) } catch {} })
       if (!ctx.setSinkId) return
       try { await ctx.setSinkId(id || '') } catch {}
     }
@@ -402,16 +625,42 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       setLocal(s)
       attach('local', s, false)
       refreshDevices()
-      channel = supabase.channel(`call:${conversationId}`, { config: { broadcast: { self: false } } })
+
+      // supabase.channel() hands back the OLD channel while it is still closing (leaving and joining
+      // again quickly, or React dev double mount). Talking on it means nobody hears you, so wait for it.
+      const topic = `realtime:call:${conversationId}`
+      for (let i = 0; i < 40 && supabase.getChannels().some(c => c.topic === topic); i++) await new Promise(r => setTimeout(r, 80))
+      if (closed) return
+
+      channel = supabase.channel(`call:${conversationId}`, { config: { broadcast: { self: false }, presence: { key: sid } } })
       channel.on('broadcast', { event: 'sig' }, ({ payload }) => {
         queue = queue.then(() => handle(payload)).catch(() => {})
       })
-      channel.subscribe(st => { if (st === 'SUBSCRIBED') send({ type: 'hello' }) })
+      channel.on('presence', { event: 'sync' }, syncRoster)
+      channel.on('presence', { event: 'leave' }, ({ leftPresences }) => {
+        for (const p of leftPresences || []) {
+          if (!p.uid || p.sid === sid) continue
+          if (roster[p.uid]?.sid === p.sid) delete roster[p.uid]
+          if (pcs[p.uid]?.rsid === p.sid) {
+            const next = readRoster()
+            if (next[p.uid]) { roster[p.uid] = next[p.uid]; ensure(p.uid) } else drop(p.uid)
+          }
+        }
+      })
+      channel.subscribe(st => {
+        if (closed || st !== 'SUBSCRIBED') return
+        // after a connection loss the links built before it may be dead for the others, start clean
+        if (subscribedOnce) Object.keys(pcs).forEach(id => drop(id, true))
+        subscribedOnce = true
+        channel.track({ uid, sid, t: joinedAt }).catch(() => {})
+        syncRoster()
+      })
     })().catch(e => endRef.current?.(e))
 
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices)
 
     // speaking detection, with a short hold so the ring does not flicker
+    let beat = 0
     const meter = setInterval(() => {
       const now = performance.now()
       const next = {}
@@ -426,6 +675,12 @@ export default function Call({ conversationId, uid, title, people, minimized, on
         next[id] = now - n.last < 320
       }
       setSpeaking(prev => (same(prev, next) ? prev : next))
+      // about once a second: wake a sleeping audio engine, every few seconds: repeat my mute state
+      // (a lost message can never leave someone shown with the wrong state for long)
+      if (++beat % 12 === 0) {
+        if (ctx.state !== 'running') wake()
+        if (beat % 60 === 0 && channel) send(myState())
+      }
     }, 80)
     const clockTimer = setInterval(() => setSecs(v => v + 1), 1000)
 
@@ -433,15 +688,24 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       closed = true
       clearInterval(meter)
       clearInterval(clockTimer)
+      wakeEvents.forEach(e => window.removeEventListener(e, wake, true))
+      document.removeEventListener('visibilitychange', wake)
       navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices)
-      send({ type: 'share', on: false })
-      send({ type: 'bye' })
-      Object.keys(pcs).forEach(drop)
+      ctx.onstatechange = null
+      if (channel) {
+        send({ type: 'share', on: false })
+        send({ type: 'bye' })
+      }
+      Object.values(waits).forEach(clearTimeout)
+      Object.keys(pcs).forEach(id => drop(id))
       Object.keys(nodes).forEach(release)
       stream.current?.getTracks().forEach(t => t.stop())
       screenRef.current?.getTracks().forEach(t => { t.onended = null; t.stop() })
       screenRef.current = null
-      if (channel) supabase.removeChannel(channel)
+      if (channel) {
+        channel.untrack().catch?.(() => {})
+        supabase.removeChannel(channel)
+      }
       ctx.close().catch(() => {})
     }
   }, [conversationId, uid])
@@ -503,7 +767,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
   }
 
   const canShare = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getDisplayMedia
-  const ids = Object.keys(remotes)
+  const ids = Object.keys(members)
   const openMenu = id => e => {
     e.preventDefault()
     if (id === uid) return
@@ -521,6 +785,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     if (prefs[id]?.muted) return 'Muted by you'
     if (peerDeaf[id]) return 'Deafened'
     if (peerMic[id] === false) return 'Muted'
+    if (members[id] === 'connecting') return 'Connecting...'
     return ''
   }
   const talkOf = id => !!speaking[id] && !prefs[id]?.muted && peerMic[id] !== false && !peerDeaf[id]
