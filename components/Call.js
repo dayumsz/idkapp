@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { supabase } from '../lib/supabase'
 import Avatar from './Avatar'
 import { Icon } from '../lib/icons'
@@ -7,7 +8,7 @@ import { Icon } from '../lib/icons'
 // Without a TURN relay, people behind mobile data / CGNAT / strict routers can never reach each other and
 // stay on "Connecting..." forever. NEXT_PUBLIC_TURN_URL accepts several urls separated by commas
 // (turn:host:3478, turn:host:443?transport=tcp, turns:host:443?transport=tcp) so restrictive networks have a way out.
-const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }]
+const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }]
 const turnUrls = (process.env.NEXT_PUBLIC_TURN_URL || '').split(',').map(u => u.trim()).filter(Boolean)
 const HAS_TURN = turnUrls.length > 0
 if (HAS_TURN) {
@@ -44,14 +45,25 @@ const same = (a, b) => {
   return ka.length === Object.keys(b).length && ka.every(k => a[k] === b[k])
 }
 
-function Screen({ stream, label }) {
+// position of every [data-flip] piece of the dock, relative to the dock itself
+function measureDock(el) {
+  const d = el.getBoundingClientRect()
+  const m = {}
+  el.querySelectorAll('[data-flip]').forEach(n => {
+    const r = n.getBoundingClientRect()
+    m[n.dataset.flip] = { x: r.left - d.left, y: r.top - d.top, hide: n.classList.contains('gone') }
+  })
+  return m
+}
+
+function Screen({ stream, label, hasAudio, onMenu }) {
   const ref = useRef(null)
   const box = useRef(null)
   useEffect(() => { if (ref.current) ref.current.srcObject = stream }, [stream])
   return (
-    <div className="screen" ref={box}>
+    <div className="screen" ref={box} onContextMenu={onMenu}>
       <video ref={ref} autoPlay playsInline muted />
-      <span className="lbl">{label}</span>
+      <span className="lbl">{label}{hasAudio ? ' · sound' : ''}</span>
       <button className="ghost fs" onClick={() => (document.fullscreenElement ? document.exitFullscreen() : box.current?.requestFullscreen?.())}>
         Fullscreen
       </button>
@@ -83,7 +95,7 @@ function Bubble({ p, you, talking, badge, small, onMenu }) {
   )
 }
 
-function Menu({ x, y, name, vol, muted, onVol, onMute, onClose }) {
+function Menu({ x, y, name, vol, muted, onVol, onMute, onClose, onChange, onStop, note }) {
   const ref = useRef(null)
   const [pos, setPos] = useState({ left: x, top: y })
 
@@ -113,24 +125,29 @@ function Menu({ x, y, name, vol, muted, onVol, onMute, onClose }) {
   return (
     <div ref={ref} className="ctx" style={pos} onContextMenu={e => e.preventDefault()}>
       <b>{name}</b>
-      <button className={muted ? '' : 'ghost'} onClick={onMute}>{muted ? 'Unmute' : 'Mute'}</button>
-      <label className="vol">
-        <span>Volume</span>
-        <output>{vol}%</output>
-        <input
-          type="range"
-          min="0"
-          max="200"
-          step="1"
-          value={vol}
-          onChange={e => {
-            const v = Number(e.target.value)
-            onVol(Math.abs(v - 100) <= 4 ? 100 : v)
-          }}
-        />
-        <div className="ticks"><i>0</i><i>100</i><i>200</i></div>
-      </label>
-      <button className="ghost" disabled={vol === 100} onClick={() => onVol(100)}>Reset volume</button>
+      {onChange && <button className="ghost" onClick={() => { onClose(); onChange() }}>Change screen or window</button>}
+      {onStop && <button className="ghost" onClick={() => { onClose(); onStop() }}>Stop sharing</button>}
+      {note && <small className="note">{note}</small>}
+      {onMute && <button className={muted ? '' : 'ghost'} onClick={onMute}>{muted ? 'Unmute' : 'Mute'}</button>}
+      {onVol && (
+        <label className="vol">
+          <span>Volume</span>
+          <output>{vol}%</output>
+          <input
+            type="range"
+            min="0"
+            max="200"
+            step="1"
+            value={vol}
+            onChange={e => {
+              const v = Number(e.target.value)
+              onVol(Math.abs(v - 100) <= 4 ? 100 : v)
+            }}
+          />
+          <div className="ticks"><i>0</i><i>100</i><i>200</i></div>
+        </label>
+      )}
+      {onVol && <button className="ghost" disabled={vol === 100} onClick={() => onVol(100)}>Reset volume</button>}
     </div>
   )
 }
@@ -168,7 +185,7 @@ function DevicePanel({ inputs, outputs, micId, outId, canOut, onMic, onOut, onCl
   )
 }
 
-export default function Call({ conversationId, uid, title, people, minimized, onMinimize, onExpand, onEnd }) {
+export default function Call({ conversationId, uid, title, people, minimized, compact, onMinimize, onExpand, onEnd }) {
   const [local, setLocal] = useState(null)
   const [members, setMembers] = useState({}) // uid -> 'connecting' | 'connected'
   const [shares, setShares] = useState({})
@@ -181,6 +198,9 @@ export default function Call({ conversationId, uid, title, people, minimized, on
   const [menu, setMenu] = useState(null)
   const [secs, setSecs] = useState(0)
   const [shareErr, setShareErr] = useState('')
+  const [shareNote, setShareNote] = useState('')
+  const [shareAudio, setShareAudio] = useState({}) // uid -> true while that screen share carries sound
+  const [fsEl, setFsEl] = useState(null)
   const [devOpen, setDevOpen] = useState(false)
   const [devs, setDevs] = useState({ inputs: [], outputs: [] })
   const [micId, setMicId] = useState(() => getSaved(MIC_KEY))
@@ -201,6 +221,75 @@ export default function Call({ conversationId, uid, title, people, minimized, on
   const prefsRef = useRef(null)
   if (prefsRef.current === null) prefsRef.current = readPrefs()
   const [prefs, setPrefs] = useState(prefsRef.current)
+
+  useEffect(() => {
+    const on = () => setFsEl(document.fullscreenElement || null)
+    document.addEventListener('fullscreenchange', on)
+    return () => document.removeEventListener('fullscreenchange', on)
+  }, [])
+
+  // the minimized dock morphs between its wide and narrow shape: the box grows/shrinks and every piece
+  // (dot, avatars, buttons) travels from where it was to where it goes (FLIP), the rest fades
+  const dockRef = useRef(null)
+  const dockBox = useRef(null)
+  const dockAnim = useRef(null)
+  const dockPos = useRef(null)
+  const dockKids = useRef([])
+  useLayoutEffect(() => {
+    const el = dockRef.current
+    if (!el) { dockBox.current = null; dockAnim.current = null; dockPos.current = null; dockKids.current = []; return }
+    if (dockAnim.current) {
+      if (dockBox.current?.compact === !!compact) return
+      // toggled again mid-animation: continue from what is on screen right now
+      const r = el.getBoundingClientRect()
+      dockPos.current = measureDock(el)
+      const a = dockAnim.current
+      a.onfinish = null
+      a.oncancel = null
+      a.cancel()
+      dockKids.current.forEach(k => k.cancel())
+      dockKids.current = []
+      dockAnim.current = null
+      dockBox.current = { w: r.width, h: r.height, compact: dockBox.current.compact }
+    }
+    const w = el.offsetWidth
+    const h = el.offsetHeight
+    const prev = dockBox.current
+    const before = dockPos.current
+    const after = measureDock(el)
+    dockBox.current = { w, h, compact: !!compact }
+    dockPos.current = after
+    const calm = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (!prev || prev.compact === !!compact || calm || typeof el.animate !== 'function') return
+
+    const opts = { duration: 340, easing: 'cubic-bezier(.2,.8,.2,1)' }
+    el.style.overflow = 'hidden'
+    const a = el.animate(
+      [{ width: `${prev.w}px`, height: `${prev.h}px` }, { width: `${w}px`, height: `${h}px` }],
+      opts
+    )
+    dockAnim.current = a
+    const kids = []
+    el.querySelectorAll('[data-flip]').forEach(n => {
+      const f = before?.[n.dataset.flip]
+      const t = after[n.dataset.flip]
+      if (!f || !t || f.hide || t.hide) return
+      const dx = f.x - t.x
+      const dy = f.y - t.y
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return
+      kids.push(n.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], opts))
+    })
+    dockKids.current = kids
+    const done = () => {
+      dockAnim.current = null
+      dockKids.current = []
+      el.style.overflow = ''
+      dockBox.current = { w: el.offsetWidth, h: el.offsetHeight, compact: !!compact }
+      dockPos.current = measureDock(el)
+    }
+    a.onfinish = done
+    a.oncancel = done
+  })
 
   const canOut = typeof window !== 'undefined' && typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype
 
@@ -321,7 +410,22 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       wake()
     }
 
-    const dropShare = id => setShares(r => { if (!r[id]) return r; const n = { ...r }; delete n[id]; return n })
+    const without = (r, id) => { if (!(id in r)) return r; const n = { ...r }; delete n[id]; return n }
+    // the person stopped sharing: the picture and its sound go away together
+    const dropShare = id => {
+      release(`screen:${id}`)
+      setShareAudio(r => without(r, id))
+      setShares(r => without(r, id))
+    }
+    // a track of one particular stream was removed (never touches a newer stream of the same person)
+    const dropShareOf = (id, st) => setShares(r => (r[id] === st ? without(r, id) : r))
+    const dropScreenAudio = (id, st) => {
+      const k = `screen:${id}`
+      if (nodes[k] && nodes[k].owner === st) {
+        release(k)
+        setShareAudio(r => without(r, id))
+      }
+    }
     const setMember = (id, state) => setMembers(m => (m[id] === state ? m : { ...m, [id]: state }))
 
     // keep = true when the link is only being rebuilt and the person is still in the call
@@ -353,7 +457,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     }
 
     // a link that does not reach "connected" is retried: first an ICE restart, then a brand new link
-    const arm = (id, pc, ms = 9000) => {
+    const arm = (id, pc, ms = 6000) => {
       clearTimeout(pc.st.watch)
       pc.st.watch = setTimeout(() => {
         if (closed || pcs[id] !== pc || pc.connectionState === 'connected') return
@@ -380,15 +484,16 @@ export default function Call({ conversationId, uid, title, people, minimized, on
 
     // perfect negotiation: both sides may renegotiate (screen share) without colliding
     const make = (id, rsid, lid) => {
-      const pc = new RTCPeerConnection({ iceServers })
+      const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4, bundlePolicy: 'max-bundle' })
       const st = { making: false, ignore: false, polite: uid < id, pending: [], out: [], ft: null, watch: null, dis: null, restarts: 0, born: Date.now() }
       pc.st = st
       pc.lid = lid
       pc.rsid = rsid
       stream.current.getTracks().forEach(t => pc.addTrack(t, stream.current))
       if (screenRef.current) {
-        const t = screenRef.current.getVideoTracks()[0]
-        senders[id] = [pc.addTrack(t, screenRef.current)]
+        const sc = screenRef.current
+        const a = sc.getAudioTracks()[0]
+        senders[id] = [pc.addTrack(sc.getVideoTracks()[0], sc), ...(a ? [pc.addTrack(a, sc)] : [])]
       }
       const flush = () => {
         clearTimeout(st.ft)
@@ -417,12 +522,23 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       }
       pc.ontrack = e => {
         if (pcs[id] !== pc) return
-        const s = e.streams[0] || new MediaStream([e.track])
+        const stm = e.streams[0] || new MediaStream([e.track])
         if (e.track.kind === 'audio') {
-          attach(id, s, true)
+          // the first audio stream is the voice, any other one belongs to a screen share
+          const isScreen = stm.getVideoTracks().length > 0 || (st.mic && st.mic !== stm.id)
+          if (isScreen) {
+            const k = `screen:${id}`
+            attach(k, new MediaStream([e.track]), true)
+            if (nodes[k]) nodes[k].owner = stm
+            setShareAudio(r => ({ ...r, [id]: true }))
+            stm.addEventListener('removetrack', ev => { if (ev.track === e.track) dropScreenAudio(id, stm) })
+          } else {
+            st.mic = stm.id
+            attach(id, stm, true)
+          }
         } else {
-          setShares(r => ({ ...r, [id]: s }))
-          s.addEventListener('removetrack', () => dropShare(id))
+          setShares(r => ({ ...r, [id]: stm }))
+          stm.addEventListener('removetrack', ev => { if (ev.track === e.track) dropShareOf(id, stm) })
         }
       }
       pc.onconnectionstatechange = () => {
@@ -440,7 +556,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
         } else if (cs === 'disconnected') {
           setMember(id, 'connecting')
           clearTimeout(st.dis)
-          st.dis = setTimeout(() => { if (pcs[id] === pc && pc.connectionState !== 'connected') recover(id, pc) }, 4000)
+          st.dis = setTimeout(() => { if (pcs[id] === pc && pc.connectionState !== 'connected') recover(id, pc) }, 2500)
         } else if (cs === 'closed') {
           clearTimeout(st.watch)
         }
@@ -470,9 +586,9 @@ export default function Call({ conversationId, uid, title, people, minimized, on
         const pc = pcs[id]
         if (pc && pc.rsid === r.sid && pc.connectionState === 'connected') return
         if (!pc || pc.rsid !== r.sid) send({ type: 'redo', to: id, tsid: r.sid })
-        waits[id] = setTimeout(again, 6000)
+        waits[id] = setTimeout(again, 3000)
       }
-      waits[id] = setTimeout(again, 4500)
+      waits[id] = setTimeout(again, 2000)
     }
 
     const ensure = id => {
@@ -574,28 +690,76 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       Object.keys(next).forEach(id => { roster[id] = next[id]; ensure(id) })
     }
 
-    const startShare = async () => {
-      const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false })
-      const t = s.getVideoTracks()[0]
-      try { t.contentHint = 'detail' } catch {}
-      t.onended = () => api.current.stopShare()
-      screenRef.current = s
-      setScreen(s)
-      Object.entries(pcs).forEach(([id, pc]) => { senders[id] = [pc.addTrack(t, s)] })
+    // sound only exists when the person picks a whole screen or a tab and ticks "share audio" in the browser dialog
+    // (newer Chrome can also offer the sound of one single window)
+    const pickScreen = async () => {
+      const md = navigator.mediaDevices
+      const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      try {
+        return await md.getDisplayMedia({ video: { frameRate: 30 }, audio, systemAudio: 'include', windowAudio: 'window' })
+      } catch (e) {
+        if (e?.name !== 'TypeError') throw e
+        try { return await md.getDisplayMedia({ video: { frameRate: 30 }, audio }) } catch (e2) {
+          if (e2?.name !== 'TypeError') throw e2
+          return md.getDisplayMedia({ video: { frameRate: 30 }, audio: true })
+        }
+      }
+    }
+
+    const NO_SOUND = 'Your share has no sound. In the browser window choose "Entire screen" (or a tab) and tick "Share system audio" / "Share tab audio". A single window usually cannot carry sound.'
+
+    const beginShare = stm => {
+      const vt = stm.getVideoTracks()[0]
+      const at = stm.getAudioTracks()[0]
+      try { vt.contentHint = 'detail' } catch {}
+      vt.onended = () => api.current.stopShare()
+      screenRef.current = stm
+      setScreen(stm)
+      setShareNote(at ? '' : NO_SOUND)
+      Object.entries(pcs).forEach(([id, pc]) => { senders[id] = [pc.addTrack(vt, stm), ...(at ? [pc.addTrack(at, stm)] : [])] })
       send({ type: 'share', on: true })
     }
 
-    const stopShare = () => {
-      const s = screenRef.current
-      if (!s) return
+    const startShare = async () => {
+      beginShare(await pickScreen())
+    }
+
+    const stopShare = quiet => {
+      const stm = screenRef.current
+      if (!stm) return
       screenRef.current = null
       setScreen(null)
-      s.getTracks().forEach(t => { t.onended = null; t.stop() })
+      setShareNote('')
+      stm.getTracks().forEach(t => { t.onended = null; t.stop() })
       Object.entries(pcs).forEach(([id, pc]) => {
         ;(senders[id] || []).forEach(sd => { try { pc.removeTrack(sd) } catch {} })
         delete senders[id]
       })
-      send({ type: 'share', on: false })
+      if (quiet !== true) send({ type: 'share', on: false })
+    }
+
+    // pick another screen or window while sharing, the viewers keep watching without a break
+    const changeShare = async () => {
+      const old = screenRef.current
+      if (!old) return startShare()
+      const next = await pickScreen() // cancelling the picker throws and the current share stays
+      const nv = next.getVideoTracks()[0]
+      const na = next.getAudioTracks()[0]
+      if (!!old.getAudioTracks()[0] !== !!na) {
+        stopShare(true)
+        beginShare(next)
+        return
+      }
+      await Promise.all(Object.keys(pcs).map(id => {
+        const [vs, as] = senders[id] || []
+        return Promise.all([vs ? vs.replaceTrack(nv) : null, as && na ? as.replaceTrack(na) : null]).catch(() => {})
+      }))
+      try { nv.contentHint = 'detail' } catch {}
+      nv.onended = () => api.current.stopShare()
+      old.getTracks().forEach(t => { t.onended = null; t.stop() })
+      screenRef.current = next
+      setScreen(next)
+      setShareNote(na ? '' : NO_SOUND)
     }
 
     // swaps the microphone while the call keeps running, nobody has to reconnect
@@ -622,7 +786,7 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       try { await ctx.setSinkId(id || '') } catch {}
     }
 
-    api.current = { send, myState, startShare, stopShare, switchMic, setSink }
+    api.current = { send, myState, startShare, stopShare, changeShare, switchMic, setSink }
 
     ;(async () => {
       const s = await getMic(getSaved(MIC_KEY))
@@ -780,6 +944,17 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     ctxRef.current?.resume().catch(() => {})
     setMenu({ id, x: e.clientX, y: e.clientY })
   }
+  const openScreenMenu = id => e => {
+    e.preventDefault()
+    ctxRef.current?.resume().catch(() => {})
+    setMenu({ id, x: e.clientX, y: e.clientY, screen: true })
+  }
+  async function changeShare() {
+    setShareErr('')
+    try { await api.current.changeShare() } catch (e) {
+      if (e?.name !== 'NotAllowedError' && e?.name !== 'AbortError') setShareErr('Could not change the shared screen')
+    }
+  }
   const closeMenu = () => setMenu(null)
   const closeDev = () => setDevOpen(false)
   const sharing = [
@@ -807,56 +982,80 @@ export default function Call({ conversationId, uid, title, people, minimized, on
     onClose: closeDev
   }
 
-  const menuEl = menu && (
-    <Menu
-      x={menu.x}
-      y={menu.y}
-      name={people[menu.id]?.display_name}
-      vol={prefs[menu.id]?.vol ?? 100}
-      muted={!!prefs[menu.id]?.muted}
-      onVol={v => setPref(menu.id, { vol: v })}
-      onMute={() => setPref(menu.id, { muted: !prefs[menu.id]?.muted })}
-      onClose={closeMenu}
-    />
-  )
+  const menuKey = menu ? (menu.screen ? `screen:${menu.id}` : menu.id) : null
+  const who = menu ? (people[menu.id]?.display_name || 'Someone') : ''
+  let menuNode = null
+  if (menu?.screen && menu.id === uid) {
+    menuNode = <Menu x={menu.x} y={menu.y} name="Your screen" onChange={changeShare} onStop={() => api.current.stopShare()} note={shareNote || undefined} onClose={closeMenu} />
+  } else if (menu?.screen && !shareAudio[menu.id]) {
+    menuNode = <Menu x={menu.x} y={menu.y} name={`${who}'s screen`} note="This screen is being shared without sound." onClose={closeMenu} />
+  } else if (menu) {
+    menuNode = (
+      <Menu
+        x={menu.x}
+        y={menu.y}
+        name={menu.screen ? `${who}'s screen` : who}
+        vol={prefs[menuKey]?.vol ?? 100}
+        muted={!!prefs[menuKey]?.muted}
+        onVol={v => setPref(menuKey, { vol: v })}
+        onMute={() => setPref(menuKey, { muted: !prefs[menuKey]?.muted })}
+        onClose={closeMenu}
+      />
+    )
+  }
+  const menuEl = menuNode && (fsEl ? createPortal(menuNode, fsEl) : menuNode)
 
-  // minimized: a small panel that stays on screen while the rest of the app is used
+  // minimized: a small panel that stays on screen while the rest of the app is used.
+  // One single markup for both widths, so the pieces can travel instead of being swapped.
   if (minimized) {
+    const shown = ids.slice(0, 3)
+    const gone = compact ? 'gone' : ''
     return (
-      <div className="dock">
-        <button className="dockinfo" onClick={onExpand} title="Back to the call">
-          <span className="live" />
-          <span className="dtxt">
+      <div className={`dock ${compact ? 'mini' : ''}`} ref={dockRef}>
+        <button className="dockinfo" onClick={onExpand} title={compact ? `${title} · ${ids.length + 1} in call · open the call` : 'Back to the call'}>
+          <span className="live" data-flip="dot" />
+          <span className={`dtxt ${gone}`}>
             <b>{title}</b>
             <small>{ids.length + 1} in call · {clock(secs)}{sharing.length > 0 ? ' · screen' : ''}</small>
           </span>
-          <span className="dexp"><Icon n="upRight" size={16} /></span>
+          <small className={`dclock ${compact ? '' : 'gone'}`}>
+            <span>{clock(secs)}</span>
+            {sharing.length > 0 && <Icon n="monitor" size={11} />}
+          </small>
+          <span className={`dexp ${gone}`}><Icon n="upRight" size={16} /></span>
         </button>
         <div className="mavs">
-          {local && <span className={`mav ${youTalk ? 'talk' : ''}`}><Avatar url={people[uid]?.avatar_url} name={people[uid]?.display_name} size={26} /></span>}
-          {ids.slice(0, 6).map(id => (
-            <span key={id} className={`mav ${talkOf(id) ? 'talk' : ''}`}><Avatar url={people[id]?.avatar_url} name={people[id]?.display_name} size={26} /></span>
+          {local && (
+            <span data-flip="av-you" className={`mav ${youTalk ? 'talk' : ''}`} title="You">
+              <Avatar url={people[uid]?.avatar_url} name={people[uid]?.display_name} size={20} />
+            </span>
+          )}
+          {shown.map(id => (
+            <span key={id} data-flip={`av-${id}`} className={`mav ${talkOf(id) ? 'talk' : ''}`} title={people[id]?.display_name}>
+              <Avatar url={people[id]?.avatar_url} name={people[id]?.display_name} size={20} />
+            </span>
           ))}
+          {ids.length > 3 && <span data-flip="more" className="mmore" title={`${ids.length - 3} more`}>+{ids.length - 3}</span>}
         </div>
         <div className="dbtns">
-          <button className={`ib ${mic ? 'ghost' : 'off'}`} onClick={toggleMic} title={mic ? 'Mute microphone' : 'Unmute microphone'}>
+          <button data-flip="b-mic" className={`ib ${mic ? 'ghost' : 'off'}`} onClick={toggleMic} title={mic ? 'Mute microphone' : 'Unmute microphone'}>
             <Icon n={mic ? 'mic' : 'micOff'} />
           </button>
-          <button className={`ib ${deaf ? 'off' : 'ghost'}`} onClick={toggleDeaf} title={deaf ? 'Undeafen' : 'Deafen (mute everyone)'}>
+          <button data-flip="b-deaf" className={`ib ${deaf ? 'off' : 'ghost'}`} onClick={toggleDeaf} title={deaf ? 'Undeafen' : 'Deafen (mute everyone)'}>
             <Icon n={deaf ? 'phonesOff' : 'phones'} />
           </button>
-          <button className={`ib ghost ${devOpen ? 'on' : ''}`} data-devbtn onClick={() => setDevOpen(v => !v)} title="Change microphone / speaker">
+          <button data-flip="b-dev" className={`ib ghost ${devOpen ? 'on' : ''} ${gone}`} data-devbtn onClick={() => setDevOpen(v => !v)} title="Change microphone / speaker">
             <Icon n="sliders" />
           </button>
-          <button className="ib ghost" onClick={onExpand} title="Open the call">
+          <button data-flip="b-exp" className={`ib ghost ${gone}`} onClick={onExpand} title="Open the call">
             <Icon n="upRight" />
           </button>
-          <button className="ib end" onClick={() => onEnd()} title="Leave call">
+          <button data-flip="b-end" className="ib end" onClick={() => onEnd()} title="Leave call">
             <Icon n="hangup" />
           </button>
         </div>
-        {shareErr && <small className="err cerr">{shareErr}</small>}
-        {devOpen && <DevicePanel {...devProps} className="dockpop" />}
+        {shareErr && !compact && <small className="err cerr">{shareErr}</small>}
+        {devOpen && !compact && <DevicePanel {...devProps} className="dockpop" />}
         {menuEl}
       </div>
     )
@@ -900,13 +1099,14 @@ export default function Call({ conversationId, uid, title, people, minimized, on
       <div className={`stage ${sharing.length ? 'has' : ''}`}>
         {sharing.length > 0 && (
           <div className="screens">
-            {sharing.map(([id, s, label]) => <Screen key={id} stream={s} label={label} />)}
+            {sharing.map(([id, stm, label]) => <Screen key={id} stream={stm} label={label} hasAudio={id === uid ? !!screen?.getAudioTracks().length : !!shareAudio[id]} onMenu={openScreenMenu(id)} />)}
           </div>
         )}
         {bubbles}
         {ids.length === 0 && local && <p className="wait">Waiting for others<span className="caret">_</span></p>}
       </div>
       {shareErr && <small className="err cerr">{shareErr}</small>}
+      {shareNote && <small className="note cerr">{shareNote}</small>}
       <div className="bar">
         <button className={`ib ${mic ? 'ghost' : 'off'}`} onClick={toggleMic} title={mic ? 'Mute microphone' : 'Unmute microphone'} aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}>
           <Icon n={mic ? 'mic' : 'micOff'} size={22} />

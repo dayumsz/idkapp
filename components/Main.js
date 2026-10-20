@@ -33,6 +33,20 @@ export default function Main({ session }) {
   const [notice, setNotice] = useState('')
   const [pinned, setPinned] = useState([])
   const [favoriteChat, setFavoriteChat] = useState(null)
+<<<<<<< HEAD
+=======
+  const [compact, setCompact] = useState(false)
+  const [wide, setWide] = useState(true)
+  useEffect(() => {
+    const m = window.matchMedia('(min-width: 701px)')
+    const on = () => setWide(m.matches)
+    on()
+    m.addEventListener('change', on)
+    return () => m.removeEventListener('change', on)
+  }, [])
+  useEffect(() => { try { setCompact(localStorage.getItem('sidebar-compact') === '1') } catch {} }, [])
+  const toggleCompact = () => setCompact(v => { const n = !v; try { localStorage.setItem('sidebar-compact', n ? '1' : '0') } catch {} if (n) setTab('chats'); return n })
+>>>>>>> 099f928 (some adds)
   const [favoriteMessages, setFavoriteMessages] = useState([])
   const roomsRef = useRef({})
   const active = chats.find(c => c.id === activeId) || null
@@ -206,12 +220,13 @@ export default function Main({ session }) {
   }
 
   return (
-    <div className={`app ${active ? 'open' : ''} ${call && !expanded ? 'incall' : ''}`}>
+    <div className={`app ${active ? 'open' : ''} ${call && !expanded ? 'incall' : ''} ${compact ? 'compact' : ''}`}>
       <aside>
         <header>
           <Avatar url={me?.avatar_url} name={me?.display_name} onClick={() => me && setViewing(me)} />
           <b>{me?.display_name}</b>
-          <button className="ghost" onClick={() => setPanel('theme')}>Theme</button>
+          <button className="ghost themebtn" onClick={() => setPanel('theme')}>Theme</button>
+          <button className="ghost compact-btn" onClick={toggleCompact} title={compact ? 'Expand sidebar' : 'Collapse sidebar'} aria-label={compact ? 'Expand sidebar' : 'Collapse sidebar'}>{compact ? '›' : '‹'}</button>
         </header>
         <nav className="tabs" data-tab={tab}>
           <button className={tab === 'chats' ? 'on' : ''} onClick={() => setTab('chats')}>Chats</button>
@@ -222,12 +237,12 @@ export default function Main({ session }) {
         </nav>
         {tab === 'chats' ? (
           <div className="list pane" key="chats">
-            <button className="ghost wide" onClick={() => setPanel('group')}>New group</button>
+            <button className="ghost wide" title="New group" onClick={() => setPanel('group')}><span className="lbl-full">New group</span><span className="lbl-short">+</span></button>
             {chats.length === 0 && <p className="note">No chats yet. Add a friend, then message them.</p>}
             {[...chats].sort((a, b) => Number(pinned.includes(b.id)) - Number(pinned.includes(a.id))).map((c, n) => {
               const i = info(c, uid)
               return (
-                <div key={c.id} className={`row ${activeId === c.id ? 'sel' : ''}`} style={{ '--i': n }} onClick={() => setActiveId(c.id)}>
+                <div key={c.id} title={i.name} className={`row ${activeId === c.id ? 'sel' : ''} ${call === c.id ? 'row-incall' : ''}`} style={{ '--i': n }} onClick={() => setActiveId(c.id)}>
                   <Avatar url={i.avatar} name={i.name} />
                   <span>{i.name}</span>
                   {pinned.includes(c.id) && <small className="pin-mark" title="Pinned">◆</small>}
@@ -289,6 +304,7 @@ export default function Main({ session }) {
           title={info(callChat, uid).name}
           people={Object.fromEntries(callChat.members.map(m => [m.profiles.id, m.profiles]))}
           minimized={!expanded}
+          compact={compact && wide}
           onMinimize={() => setExpanded(false)}
           onExpand={() => setExpanded(true)}
           onEnd={endCall}
