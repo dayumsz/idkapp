@@ -346,8 +346,6 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 .msg.bare .message-more{left:6px;right:auto;top:6px;background:#000a;color:#fff;border:0}
 .mrow.me .msg.bare .message-more{color:#fff;border:0}
 .msg.bare .embedded-gif{margin:0}
-<<<<<<< HEAD
-=======
 
 /* collapsible sidebar + minimized call */
 :root{--ease:cubic-bezier(.2,.8,.2,1)}
@@ -404,4 +402,3 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 @media (prefers-reduced-motion:reduce){
   aside,aside header,aside header b,.themebtn,.compact-btn,.tabs,.row,.row::after,.wide,.dtxt,.dexp,.dclock,.dbtns .ib,.dock .gone{transition:none!important}
 }
->>>>>>> 099f928 (some adds)
