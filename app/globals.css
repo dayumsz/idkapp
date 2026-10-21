@@ -402,3 +402,17 @@ select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,v
 @media (prefers-reduced-motion:reduce){
   aside,aside header,aside header b,.themebtn,.compact-btn,.tabs,.row,.row::after,.wide,.dtxt,.dexp,.dclock,.dbtns .ib,.dock .gone{transition:none!important}
 }
+
+/* ---- alerts: unread badge, message toast, alerts picker ---- */
+.row .unread{margin-left:auto;min-width:20px;text-align:center;background:var(--accent);color:var(--on-accent);padding:0 7px;border-radius:999px;font-style:normal;font-size:11px;line-height:20px;animation:pulse 1.4s infinite}
+.row .unread + .tag,.row .tag + .unread{margin-left:8px}
+.app.compact .row .unread{position:absolute;top:2px;right:2px;margin:0;min-width:16px;padding:0 4px;line-height:16px;font-size:10px}
+.msg-toast{position:fixed;z-index:31;top:16px;right:16px;max-width:min(340px,92vw);display:flex;flex-direction:column;gap:2px;text-align:left;text-transform:none;letter-spacing:0;padding:10px 14px;background:var(--panel);color:var(--text);border:1px solid var(--accent);border-radius:14px;box-shadow:var(--shadow);animation:drop .25s cubic-bezier(.2,.8,.2,1)}
+.msg-toast b{font-size:12px}
+.msg-toast span{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.opt-toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--panel2);color:var(--text);border-color:var(--border);text-transform:none;letter-spacing:0;font-size:13px}
+.opt-toggle.on{border-color:var(--accent)}
+.opt-toggle b{font-weight:700}
+.opt-toggle:disabled{opacity:.5;cursor:not-allowed}
+.load-older{align-self:center;flex:none}
+.hint-bar{position:fixed;z-index:32;left:0;right:0;bottom:84px;margin:0 auto;width:fit-content;max-width:92vw;text-transform:none;letter-spacing:0;background:var(--panel);border:1px solid var(--border);border-radius:999px;padding:8px 14px;box-shadow:var(--shadow)}

@@ -1,55 +1,30 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { info } from '../lib/info'
 import Avatar from './Avatar'
 import { Icon } from '../lib/icons'
 import GroupInfo from './GroupInfo'
 import { Attachment, Once, Pic } from './Media'
+import { playTone } from '../lib/notify'
+import { shrinkPhoto } from '../lib/image'
 
 const TYPES = ['image/png', 'image/jpeg', 'image/gif', 'video/mp4', 'video/webm', 'video/quicktime']
 const MAX_IMAGE = 50 * 1024 * 1024
 const GIF_RE = /https?:\/\/[^\s<>()]+?\.(?:gif|gifv)(?:\?[^\s<>()]*)?/i
 const URL_RE = /https?:\/\/[^\s<>()]+/i
 
-function playTone(kind = 'message') {
-  if (typeof window === 'undefined') return
-
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext
-    if (!AudioContextClass) return
-
-    const context = new AudioContextClass()
-    const tones = kind === 'call'
-      ? [[440, 0, 0.16], [554, 0.2, 0.18], [659, 0.42, 0.24]]
-      : kind === 'ring'
-        ? [[660, 0, 0.18], [880, 0.22, 0.22], [660, 0.55, 0.18], [880, 0.78, 0.22]]
-        : kind === 'send'
-          ? [[520, 0, 0.07], [660, 0.08, 0.08]]
-          : kind === 'receive'
-            ? [[740, 0, 0.1], [980, 0.12, 0.14]]
-            : [[600, 0, 0.06]]
-
-    tones.forEach(([frequency, start, duration]) => {
-      const oscillator = context.createOscillator()
-      const gain = context.createGain()
-
-      oscillator.type = 'sine'
-      oscillator.frequency.value = frequency
-      gain.gain.setValueAtTime(0.0001, context.currentTime + start)
-      gain.gain.exponentialRampToValueAtTime(0.09, context.currentTime + start + 0.015)
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + start + duration)
-
-      oscillator.connect(gain)
-      gain.connect(context.destination)
-      oscillator.start(context.currentTime + start)
-      oscillator.stop(context.currentTime + start + duration + 0.02)
-    })
-
-    setTimeout(() => context.close().catch(() => {}), 1800)
-  } catch {}
+const PAGE = 60
+const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out }
+const byTime = (a, b) => new Date(a.created_at) - new Date(b.created_at)
+// server rows win over what is already in memory, rows that exist only here (just sent) are kept
+const mergeMsgs = (cur, rows) => {
+  const m = new Map(cur.map(x => [x.id, x]))
+  rows.forEach(r => m.set(r.id, { ...m.get(r.id), ...r }))
+  return [...m.values()].sort(byTime)
 }
+const tabOn = () => document.visibilityState === 'visible' && document.hasFocus()
 
 function cleanUrl(url) {
   return url?.replace(/[.,!?;:]+$/, '') || ''
@@ -82,11 +57,10 @@ function getGifMedia(body) {
         const id = last.match(/-([a-zA-Z0-9]+)$/)?.[1] || (parts.length === 2 ? last : '')
 
         if (id) {
-          return {
-            type: 'iframe',
-            url: `https://giphy.com/embed/${id}`,
-            originalUrl
-          }
+          const embed = `https://giphy.com/embed/${id}`
+          // a plain image loads much faster than the full giphy embed page; clips only exist as embeds
+          if (parts[0] === 'gifs') return { type: 'image', url: `https://media.giphy.com/media/${id}/giphy.gif`, fallback: embed, originalUrl }
+          return { type: 'iframe', url: embed, originalUrl }
         }
       }
     }
@@ -111,26 +85,20 @@ function getGifMedia(body) {
   return null
 }
 
+function GifView({ media }) {
+  const [failed, setFailed] = useState(false)
+  if (media.type === 'iframe' || failed) {
+    return <iframe className="embedded-gif embedded-gif-frame" src={failed ? media.fallback : media.url} title="GIF" allow="fullscreen" />
+  }
+  return <img className="embedded-gif" src={media.url} alt="GIF" decoding="async" onError={() => media.fallback && setFailed(true)} />
+}
+
 function renderBody(body) {
   if (!body) return null
 
   const media = getGifMedia(body)
 
-  if (media) {
-    if (media.type === 'image') {
-      return <img className="embedded-gif" src={media.url} alt="GIF" loading="lazy" />
-    }
-
-    return (
-      <iframe
-        className="embedded-gif embedded-gif-frame"
-        src={media.url}
-        title="GIF"
-        loading="lazy"
-        allow="fullscreen"
-      />
-    )
-  }
+  if (media) return <GifView media={media} />
 
   const url = body.match(URL_RE)?.[0]
 
@@ -153,6 +121,7 @@ export default function Chat({
   pinned,
   onTogglePin,
   onShowFavorites,
+  subscribe,
   dismissKey
 }) {
   const [msgs, setMsgs] = useState([])
@@ -171,6 +140,8 @@ export default function Chat({
   const [reply, setReply] = useState(null)
   const [menu, setMenu] = useState(null)
   const [topMenu, setTopMenu] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
 
   useEffect(() => {
     setShowGifs(false)
@@ -180,25 +151,60 @@ export default function Chat({
   const attRef = useRef(null)
   const end = useRef(null)
   const touchRef = useRef(null)
+  const box = useRef(null)
+  const stick = useRef(true) // the list is scrolled to the bottom, so new messages keep it there
+  const prepend = useRef(null)
+  const firstScroll = useRef(true)
+  const msgsRef = useRef([])
+  const seenMine = useRef(new Set())
+  msgsRef.current = msgs
 
   const people = Object.fromEntries(chat.members.map(m => [m.profiles.id, m.profiles]))
   const names = Object.fromEntries(Object.values(people).map(p => [p.id, p.display_name]))
   const i = info(chat, uid)
   const other = chat.is_group ? null : Object.values(people).find(p => p.id !== uid)
 
+  // ids go in small groups: hundreds of uuids in one request make the url too long and the request fails silently
   const loadReceipts = useCallback(async ids => {
-    if (!ids?.length) {
-      setReceipts([])
-      return
-    }
-
-    const { data } = await supabase
+    if (!ids?.length) return []
+    const parts = await Promise.all(chunk(ids, 80).map(c => supabase
       .from('message_receipts')
       .select('message_id,user_id,status,updated_at')
-      .in('message_id', ids)
+      .in('message_id', c)))
+    const rows = parts.flatMap(r => r.data || [])
+    rows.filter(r => r.user_id === uid && r.status === 'seen').forEach(r => seenMine.current.add(r.message_id))
+    setReceipts(cur => {
+      const m = new Map(cur.map(r => [`${r.message_id}:${r.user_id}`, r]))
+      rows.forEach(r => m.set(`${r.message_id}:${r.user_id}`, r))
+      return [...m.values()]
+    })
+    return rows
+  }, [uid])
 
-    setReceipts(data || [])
+  const loadViews = useCallback(async ids => {
+    if (!ids?.length) return
+    const parts = await Promise.all(chunk(ids, 80).map(c => supabase.from('message_views').select('message_id,user_id').in('message_id', c)))
+    const rows = parts.flatMap(r => r.data || [])
+    setViews(cur => {
+      const m = new Map(cur.map(v => [`${v.message_id}:${v.user_id}`, v]))
+      rows.forEach(v => m.set(`${v.message_id}:${v.user_id}`, v))
+      return [...m.values()]
+    })
   }, [])
+
+  // tells the senders I saw their messages. Only messages not yet marked, and only while the tab is really
+  // in front of me. (Marking the whole history on every open used to flood realtime and slow everything down.)
+  const markSeen = useCallback(async list => {
+    if (!tabOn()) return
+    const todo = list.filter(m => m.sender_id !== uid && !m.deleted_at && !seenMine.current.has(m.id))
+    if (!todo.length) return
+    todo.forEach(m => seenMine.current.add(m.id))
+    const now = new Date().toISOString()
+    const { error } = await supabase
+      .from('message_receipts')
+      .upsert(todo.map(m => ({ message_id: m.id, user_id: uid, status: 'seen', updated_at: now })), { onConflict: 'message_id,user_id' })
+    if (error) todo.forEach(m => seenMine.current.delete(m.id))
+  }, [uid])
 
   const loadFavorites = useCallback(async () => {
     const [{ data: fav }, { data: gifs }] = await Promise.all([
@@ -210,138 +216,101 @@ export default function Chat({
     setGifFavorites(gifs || [])
   }, [uid])
 
+  // newest page of the conversation. Also used to catch up after a reconnect / coming back to the tab.
+  const loadLatest = useCallback(async initial => {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', chat.id)
+      .order('created_at', { ascending: false })
+      .limit(PAGE)
+    if (error || !data) return
+    const list = [...data].reverse()
+    if (initial) setHasMore(data.length === PAGE)
+    setMsgs(cur => mergeMsgs(cur, list))
+    const ids = list.map(x => x.id)
+    await Promise.all([loadViews(ids), loadReceipts(ids)])
+    markSeen(list)
+  }, [chat.id, loadReceipts, loadViews, markSeen])
+
   useEffect(() => {
-    let alive = true
+    loadLatest(true)
+    loadFavorites()
+  }, [loadLatest, loadFavorites])
 
-    const load = async () => {
-      const { data } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', chat.id)
-        .order('created_at')
-
-      const list = data || []
-      if (!alive) return
-
-      setMsgs(current => {
-        const merged = new Map(list.map(message => [message.id, message]))
-
-        current.forEach(message => {
-          merged.set(message.id, { ...merged.get(message.id), ...message })
-        })
-
-        return [...merged.values()].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      })
-
-      const ids = list.map(x => x.id)
-
-      if (ids.length) {
-        const { data: v } = await supabase
-          .from('message_views')
-          .select('message_id,user_id')
-          .in('message_id', ids)
-
-        if (alive) setViews(v || [])
-
-        await loadReceipts(ids)
-
-        await supabase.from('message_receipts').upsert(
-          list
-            .filter(m => m.sender_id !== uid && !m.deleted_at)
-            .map(m => ({
-              message_id: m.id,
-              user_id: uid,
-              status: 'seen',
-              updated_at: new Date().toISOString()
-            })),
-          { onConflict: 'message_id,user_id' }
-        )
+  // live events come from the one app-wide realtime connection (see Main.js)
+  useEffect(() => {
+    if (!subscribe) return
+    return subscribe(ev => {
+      if (ev.type === 'insert') {
+        const m = ev.row
+        if (m.conversation_id !== chat.id) return
+        setMsgs(cur => (cur.some(x => x.id === m.id) ? cur : mergeMsgs(cur, [m])))
+        if (m.sender_id !== uid) markSeen([m])
+      } else if (ev.type === 'update') {
+        if (ev.row.conversation_id !== chat.id) return
+        setMsgs(cur => cur.map(x => (x.id === ev.row.id ? { ...x, ...ev.row } : x)))
+      } else if (ev.type === 'delete') {
+        setMsgs(cur => cur.filter(x => x.id !== ev.id))
+      } else if (ev.type === 'receipt') {
+        const row = ev.row
+        setReceipts(r => [...r.filter(x => !(x.message_id === row.message_id && x.user_id === row.user_id)), row])
+      } else if (ev.type === 'view') {
+        setViews(v => (v.some(x => x.message_id === ev.row.message_id && x.user_id === ev.row.user_id) ? v : [...v, ev.row]))
+      } else if (ev.type === 'resync') {
+        loadLatest(false)
       }
+    })
+  }, [subscribe, chat.id, uid, loadLatest, markSeen])
 
-      loadFavorites()
+  async function loadOlder() {
+    const first = msgsRef.current[0]
+    if (!first || loadingOlder) return
+    setLoadingOlder(true)
+    const { data } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', chat.id)
+      .lt('created_at', first.created_at)
+      .order('created_at', { ascending: false })
+      .limit(PAGE)
+    const older = [...(data || [])].reverse()
+    setHasMore((data || []).length === PAGE)
+    if (older.length) {
+      prepend.current = box.current ? box.current.scrollHeight : null
+      setMsgs(cur => mergeMsgs(cur, older))
+      const ids = older.map(x => x.id)
+      loadViews(ids)
+      loadReceipts(ids)
     }
+    setLoadingOlder(false)
+  }
 
-    load()
-
-    const ch = supabase
-      .channel(`msgs:${chat.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${chat.id}`
-        },
-        async p => {
-          if (p.eventType === 'INSERT') {
-            setMsgs(current =>
-              current.some(message => message.id === p.new.id)
-                ? current
-                : [...current, p.new].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-            )
-
-            if (p.new.sender_id !== uid) {
-              playTone(p.new.kind && p.new.kind !== 'text' ? 'ring' : 'receive')
-
-              await supabase.from('message_receipts').upsert({
-                message_id: p.new.id,
-                user_id: uid,
-                status: 'seen',
-                updated_at: new Date().toISOString()
-              }, { onConflict: 'message_id,user_id' })
-            }
-
-            loadReceipts([p.new.id])
-          } else if (p.eventType === 'UPDATE') {
-            setMsgs(m => m.map(x => x.id === p.new.id ? p.new : x))
-          } else if (p.eventType === 'DELETE') {
-            setMsgs(m => m.filter(x => x.id !== p.old.id))
-          }
-        }
-      )
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'message_receipts'
-      }, p => {
-        const row = p.new
-
-        if (row?.message_id) {
-          setReceipts(r => [
-            ...r.filter(x => !(x.message_id === row.message_id && x.user_id === row.user_id)),
-            row
-          ])
-        }
-      })
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'message_views'
-      }, p => {
-        setViews(v =>
-          v.some(x => x.message_id === p.new.message_id && x.user_id === p.new.user_id)
-            ? v
-            : [...v, p.new]
-        )
-      })
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'message_favorites',
-        filter: `user_id=eq.${uid}`
-      }, () => loadFavorites())
-      .subscribe()
-
-    return () => {
-      alive = false
-      supabase.removeChannel(ch)
+  // keep the bottom in view only when the person is already at the bottom (or just sent something),
+  // and keep the position when older messages are added on top
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    if (prepend.current !== null) {
+      el.scrollTop += el.scrollHeight - prepend.current
+      prepend.current = null
+      return
     }
-  }, [chat.id, uid, loadReceipts, loadFavorites])
+    const last = msgs[msgs.length - 1]
+    if (!last) return
+    if (firstScroll.current) {
+      firstScroll.current = false
+      el.scrollTop = el.scrollHeight
+    } else if (stick.current || last.sender_id === uid) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    }
+  }, [msgs, uid])
 
-  useEffect(() => {
-    end.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [msgs])
+  // photos / GIFs / videos change the height when they finish loading: stay at the bottom
+  const settle = () => {
+    const el = box.current
+    if (el && stick.current) el.scrollTop = el.scrollHeight
+  }
 
   const lastCallId = [...msgs].reverse().find(x => x.kind !== 'text')?.id
   const live = !!roomUsers && roomUsers.length > 0
@@ -409,8 +378,9 @@ export default function Chat({
         const result = await insert({ body, reply_to: reply?.id || null })
         error = result.error
       } else {
-        const f = att.file
-        const isVideo = f.type.startsWith('video/')
+        const isVideo = att.file.type.startsWith('video/')
+        // big photos are reduced first: much faster upload, and much faster to show up for the other person
+        const f = isVideo ? att.file : await shrinkPhoto(att.file)
         const extension = f.name.split('.').pop()?.toLowerCase() || (isVideo ? 'mp4' : f.type === 'image/png' ? 'png' : f.type === 'image/gif' ? 'gif' : 'jpg')
         const path = `${uid}/${crypto.randomUUID()}.${extension}`
 
@@ -430,7 +400,8 @@ export default function Chat({
           error = result.error
         } else {
           const up = await supabase.storage.from('chat-images').upload(path, f, {
-            contentType: f.type
+            contentType: f.type,
+            cacheControl: '31536000'
           })
 
           if (up.error) throw new Error('Image upload failed')
@@ -684,7 +655,18 @@ export default function Chat({
         </button>
       </div>
 
-      <div className="msgs">
+      <div
+        className="msgs"
+        ref={box}
+        onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160 }}
+        onLoadCapture={settle}
+        onLoadedMetadataCapture={settle}
+      >
+        {hasMore && (
+          <button className="ghost load-older" disabled={loadingOlder} onClick={loadOlder}>
+            {loadingOlder ? 'Loading...' : 'Load earlier messages'}
+          </button>
+        )}
         {msgs.length === 0 && (
           <div className="empty small">
             No messages yet<span className="caret">_</span>
@@ -820,22 +802,7 @@ export default function Chat({
 
                         {gifMedia && (
                           <div className="gif-wrap">
-                            {gifMedia.type === 'image' ? (
-                              <img
-                                className="embedded-gif"
-                                src={gifMedia.url}
-                                alt="GIF"
-                                loading="lazy"
-                              />
-                            ) : (
-                              <iframe
-                                className="embedded-gif embedded-gif-frame"
-                                src={gifMedia.url}
-                                title="GIF"
-                                loading="lazy"
-                                allow="fullscreen"
-                              />
-                            )}
+                            <GifView media={gifMedia} />
 
                             <button
                               className="gif-heart ghost"
@@ -1016,4 +983,4 @@ export default function Chat({
       )}
     </div>
   )
-}
+}

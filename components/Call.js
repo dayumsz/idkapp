@@ -95,7 +95,7 @@ function Bubble({ p, you, talking, badge, small, onMenu }) {
   )
 }
 
-function Menu({ x, y, name, vol, muted, onVol, onMute, onClose, onChange, onStop, note }) {
+function Menu({ x, y, name, vol, muted, onVol, onMute, onClose, onChange, onStop, onSound, soundOn, note }) {
   const ref = useRef(null)
   const [pos, setPos] = useState({ left: x, top: y })
 
@@ -126,6 +126,7 @@ function Menu({ x, y, name, vol, muted, onVol, onMute, onClose, onChange, onStop
     <div ref={ref} className="ctx" style={pos} onContextMenu={e => e.preventDefault()}>
       <b>{name}</b>
       {onChange && <button className="ghost" onClick={() => { onClose(); onChange() }}>Change screen or window</button>}
+      {onSound && <button className="ghost" onClick={() => { onClose(); onSound() }}>{soundOn ? 'Mute screen sound for viewers' : 'Unmute screen sound'}</button>}
       {onStop && <button className="ghost" onClick={() => { onClose(); onStop() }}>Stop sharing</button>}
       {note && <small className="note">{note}</small>}
       {onMute && <button className={muted ? '' : 'ghost'} onClick={onMute}>{muted ? 'Unmute' : 'Mute'}</button>}
@@ -199,6 +200,8 @@ export default function Call({ conversationId, uid, title, people, minimized, co
   const [secs, setSecs] = useState(0)
   const [shareErr, setShareErr] = useState('')
   const [shareNote, setShareNote] = useState('')
+  const [shareSound, setShareSound] = useState(true) // my screen's sound is going out to the others
+  const [locked, setLocked] = useState(false) // browser keeps the audio engine asleep until the first click
   const [shareAudio, setShareAudio] = useState({}) // uid -> true while that screen share carries sound
   const [fsEl, setFsEl] = useState(null)
   const [devOpen, setDevOpen] = useState(false)
@@ -370,6 +373,13 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       Object.values(nodes).forEach(n => { if (n.el && n.el.paused) n.el.play().catch(() => {}) })
     }
     ctx.onstatechange = () => { syncAll(); if (ctx.state !== 'running') wake() }
+    // reloading or closing the tab: say goodbye so the others drop this link at once and the rejoin is clean
+    const bye = () => {
+      if (!channel) return
+      send({ type: 'share', on: false })
+      send({ type: 'bye' })
+    }
+    window.addEventListener('pagehide', bye)
     const wakeEvents = ['pointerdown', 'keydown', 'touchend', 'click']
     wakeEvents.forEach(e => window.addEventListener(e, wake, true))
     document.addEventListener('visibilitychange', wake)
@@ -694,7 +704,9 @@ export default function Call({ conversationId, uid, title, people, minimized, co
     // (newer Chrome can also offer the sound of one single window)
     const pickScreen = async () => {
       const md = navigator.mediaDevices
-      const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      // restrictOwnAudio: keep the sound of THIS page (the voices of the call) out of the shared system sound,
+      // otherwise the people in the call hear themselves through your screen share
+      const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, restrictOwnAudio: true }
       try {
         return await md.getDisplayMedia({ video: { frameRate: 30 }, audio, systemAudio: 'include', windowAudio: 'window' })
       } catch (e) {
@@ -706,7 +718,17 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       }
     }
 
-    const NO_SOUND = 'Your share has no sound. In the browser window choose "Entire screen" (or a tab) and tick "Share system audio" / "Share tab audio". A single window usually cannot carry sound.'
+    const NO_SOUND = 'Your share has no sound. In the browser dialog pick the window and tick its audio option if one is offered (recent Chrome / Edge can share the sound of just one window on supported systems). Otherwise choose "Entire screen" and tick "Share system audio".'
+    const ECHO = 'You are sharing the sound of the whole computer. Anything it plays, including the people in this call, goes out through your share and they may hear themselves. Share a single window with its own audio instead, or right-click your screen and mute its sound.'
+    // warns when the whole screen's sound is shared and the browser did not remove the call's own audio from it
+    const noteFor = (vt, at) => {
+      if (!at) return NO_SOUND
+      let surface = ''
+      let own
+      try { surface = vt.getSettings().displaySurface || '' } catch {}
+      try { own = at.getSettings().restrictOwnAudio } catch {}
+      return surface === 'monitor' && own !== true ? ECHO : ''
+    }
 
     const beginShare = stm => {
       const vt = stm.getVideoTracks()[0]
@@ -715,7 +737,8 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       vt.onended = () => api.current.stopShare()
       screenRef.current = stm
       setScreen(stm)
-      setShareNote(at ? '' : NO_SOUND)
+      setShareNote(noteFor(vt, at))
+      setShareSound(true)
       Object.entries(pcs).forEach(([id, pc]) => { senders[id] = [pc.addTrack(vt, stm), ...(at ? [pc.addTrack(at, stm)] : [])] })
       send({ type: 'share', on: true })
     }
@@ -730,6 +753,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       screenRef.current = null
       setScreen(null)
       setShareNote('')
+      setShareSound(true)
       stm.getTracks().forEach(t => { t.onended = null; t.stop() })
       Object.entries(pcs).forEach(([id, pc]) => {
         ;(senders[id] || []).forEach(sd => { try { pc.removeTrack(sd) } catch {} })
@@ -759,7 +783,16 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       old.getTracks().forEach(t => { t.onended = null; t.stop() })
       screenRef.current = next
       setScreen(next)
-      setShareNote(na ? '' : NO_SOUND)
+      setShareNote(noteFor(nv, na))
+      setShareSound(true)
+    }
+
+    // silences (or restores) the sound of my screen share for everyone, without stopping the picture
+    const toggleShareSound = () => {
+      const a = screenRef.current?.getAudioTracks()[0]
+      if (!a) return
+      a.enabled = !a.enabled
+      setShareSound(a.enabled)
     }
 
     // swaps the microphone while the call keeps running, nobody has to reconnect
@@ -786,7 +819,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       try { await ctx.setSinkId(id || '') } catch {}
     }
 
-    api.current = { send, myState, startShare, stopShare, changeShare, switchMic, setSink }
+    api.current = { send, myState, startShare, stopShare, changeShare, toggleShareSound, switchMic, setSink }
 
     ;(async () => {
       const s = await getMic(getSaved(MIC_KEY))
@@ -849,6 +882,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       // (a lost message can never leave someone shown with the wrong state for long)
       if (++beat % 12 === 0) {
         if (ctx.state !== 'running') wake()
+        setLocked(ctx.state !== 'running')
         if (beat % 60 === 0 && channel) send(myState())
       }
     }, 80)
@@ -859,6 +893,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
       clearInterval(meter)
       clearInterval(clockTimer)
       wakeEvents.forEach(e => window.removeEventListener(e, wake, true))
+      window.removeEventListener('pagehide', bye)
       document.removeEventListener('visibilitychange', wake)
       navigator.mediaDevices?.removeEventListener?.('devicechange', refreshDevices)
       ctx.onstatechange = null
@@ -986,7 +1021,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
   const who = menu ? (people[menu.id]?.display_name || 'Someone') : ''
   let menuNode = null
   if (menu?.screen && menu.id === uid) {
-    menuNode = <Menu x={menu.x} y={menu.y} name="Your screen" onChange={changeShare} onStop={() => api.current.stopShare()} note={shareNote || undefined} onClose={closeMenu} />
+    menuNode = <Menu x={menu.x} y={menu.y} name="Your screen" onChange={changeShare} onStop={() => api.current.stopShare()} onSound={screen?.getAudioTracks().length ? () => api.current.toggleShareSound() : undefined} soundOn={shareSound} note={shareNote || undefined} onClose={closeMenu} />
   } else if (menu?.screen && !shareAudio[menu.id]) {
     menuNode = <Menu x={menu.x} y={menu.y} name={`${who}'s screen`} note="This screen is being shared without sound." onClose={closeMenu} />
   } else if (menu) {
@@ -1054,6 +1089,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
             <Icon n="hangup" />
           </button>
         </div>
+        {locked && <small className="note hint-bar">Click anywhere to turn on call sound</small>}
         {shareErr && !compact && <small className="err cerr">{shareErr}</small>}
         {devOpen && !compact && <DevicePanel {...devProps} className="dockpop" />}
         {menuEl}
@@ -1105,6 +1141,7 @@ export default function Call({ conversationId, uid, title, people, minimized, co
         {bubbles}
         {ids.length === 0 && local && <p className="wait">Waiting for others<span className="caret">_</span></p>}
       </div>
+      {locked && <small className="note hint-bar">Click anywhere to turn on call sound</small>}
       {shareErr && <small className="err cerr">{shareErr}</small>}
       {shareNote && <small className="note cerr">{shareNote}</small>}
       <div className="bar">
